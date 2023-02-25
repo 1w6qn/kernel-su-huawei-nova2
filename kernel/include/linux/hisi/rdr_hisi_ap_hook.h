@@ -1,29 +1,26 @@
-/*******************************************************************************
 
-  版权所有 (C), 2001-2011, 华为技术有限公司
+#ifndef __RDR_HISI_AP_HOOK_H__
+#define __RDR_HISI_AP_HOOK_H__
 
- *******************************************************************************
- 文 件 名   : rdr_hisi_ap_hook.h
- 版 本 号   : 初稿
- 作    者   : 蒋孝伟 00207786
- 生成日期   : 2015年1月15日
- 最近修改   :
- 功能描述   : AP侧轨迹钩子头文件
- 修改历史   :
- 1.日    期 : 2015年1月15日
- 作    者   : 蒋孝伟 00207786
- 修改内容   : 创建文件
-
- *******************************************************************************/
 #include <linux/thread_info.h>
 #include <linux/hisi/rdr_types.h>
 #include <linux/hisi/rdr_pub.h>
+#include <linux/version.h>
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0))
 #include <linux/hisi/hisi_ion.h>
+#endif
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 76))
+#include <linux/sched.h>
+#endif
 
 #define MEM_ALLOC 1
 #define MEM_FREE  0
 
 typedef u64 (*arch_timer_func_ptr)(void);
+
+extern arch_timer_func_ptr g_arch_timer_func_ptr;
 
 typedef enum{
     HK_IRQ = 0,
@@ -38,6 +35,7 @@ typedef enum{
     HK_SYSCALL,
     HK_HUNGTASK,
     HK_TASKLET,
+    HK_DIAGINFO,
     HK_MAX
 }
 hook_type;
@@ -161,6 +159,7 @@ int syscall_buffer_init(unsigned char **addr, unsigned int size);
 int hung_task_buffer_init(unsigned char **addr, unsigned int size);
 int worker_buffer_init(percpu_buffer_info* buffer_info, unsigned char* addr, unsigned int size);
 int tasklet_buffer_init(unsigned char **addr, unsigned int size);
+int diaginfo_buffer_init(unsigned char **addr, unsigned int size);
 int mem_alloc_buffer_init(percpu_buffer_info *buffer_info, unsigned char* addr, unsigned int size);
 int ion_alloc_buffer_init(percpu_buffer_info *buffer_info, unsigned char *addr, unsigned int size);
 int percpu_buffer_init(percpu_buffer_info *buffer_info, u32 ratio[][8],
@@ -181,13 +180,17 @@ void worker_hook(u64 address, u32 dir);
 void page_trace_hook(gfp_t gfp_flag, u8 action, u64 caller, struct page *page, u32 order);
 void kmalloc_trace_hook(u8 action, u64 caller, u64 va_addr, u64 phy_addr, u32 size);
 void vmalloc_trace_hook(u8 action, u64 caller, u64 va_addr, struct page *page, u64 size);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0))
 void ion_trace_hook(u8 action, struct ion_client *client, struct ion_handle *handle);
+#endif
 void smmu_trace_hook(u8 action, u64 va_addr, u64 phy_addr, u32 size);
 #else
 static inline void page_trace_hook(gfp_t gfp_flag, u8 action, u64 caller, struct page *page, u32 order){}
 static inline void kmalloc_trace_hook(u8 action, u64 caller, u64 va_addr, u64 phy_addr, u32 size){}
 static inline void vmalloc_trace_hook(u8 action, u64 caller, u64 va_addr, struct page *page, u64 size){}
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0))
 static inline void ion_trace_hook(u8 action, struct ion_client *client, struct ion_handle *handle){}
+#endif
 static inline void smmu_trace_hook(u8 action, u64 va_addr, u64 phy_addr, u32 size){}
 #endif
 #else
@@ -203,7 +206,9 @@ static inline void worker_hook(u64 address, u32 dir){}
 static inline void page_trace_hook(gfp_t gfp_flag, u8 action, u64 caller, struct page *page, u32 order){}
 static inline void kmalloc_trace_hook(u8 action, u64 caller, u64 va_addr, u64 phy_addr, u32 size){}
 static inline void vmalloc_trace_hook(u8 action, u64 caller, u64 va_addr, struct page *page, u64 size){}
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0))
 static inline void ion_trace_hook(u8 action, struct ion_client *client, struct ion_handle *handle){}
+#endif
 static inline void smmu_trace_hook(u8 action, u64 va_addr, u64 phy_addr, u32 size){}
 #endif
 
@@ -213,6 +218,8 @@ void time_hook(u64 address, u32 dir);
 static inline void time_hook(u64 address, u32 dir){}
 #endif
 
+void hisi_ap_defopen_hook_install(void);
 int hisi_ap_hook_install(hook_type hk);
 int hisi_ap_hook_uninstall(hook_type hk);
-
+ 
+#endif

@@ -24,9 +24,27 @@
 
 static inline void INIT_LIST_HEAD(struct list_head *list)
 {
-	list->next = list;
+	WRITE_ONCE(list->next, list);
 	list->prev = list;
 }
+
+#ifdef CONFIG_DEBUG_LIST
+extern bool __list_add_valid(struct list_head *new,
+			      struct list_head *prev,
+			      struct list_head *next);
+extern bool __list_del_entry_valid(struct list_head *entry);
+#else
+static inline bool __list_add_valid(struct list_head *new,
+				struct list_head *prev,
+				struct list_head *next)
+{
+	return true;
+}
+static inline bool __list_del_entry_valid(struct list_head *entry)
+{
+	return true;
+}
+#endif
 
 /*
  * Insert a new entry between two known consecutive entries.
@@ -34,21 +52,18 @@ static inline void INIT_LIST_HEAD(struct list_head *list)
  * This is only for internal list manipulation where we know
  * the prev/next entries already!
  */
-#ifndef CONFIG_DEBUG_LIST
 static inline void __list_add(struct list_head *new,
 			      struct list_head *prev,
 			      struct list_head *next)
 {
+	if (!__list_add_valid(new, prev, next))
+		return;
+
 	next->prev = new;
 	new->next = next;
 	new->prev = prev;
-	prev->next = new;
+	WRITE_ONCE(prev->next, new);
 }
-#else
-extern void __list_add(struct list_head *new,
-			      struct list_head *prev,
-			      struct list_head *next);
-#endif
 
 /**
  * list_add - add a new entry
@@ -96,22 +111,20 @@ static inline void __list_del(struct list_head * prev, struct list_head * next)
  * Note: list_empty() on entry does not return true after this, the entry is
  * in an undefined state.
  */
-#ifndef CONFIG_DEBUG_LIST
 static inline void __list_del_entry(struct list_head *entry)
 {
+	if (!__list_del_entry_valid(entry))
+		return;
+
 	__list_del(entry->prev, entry->next);
 }
 
 static inline void list_del(struct list_head *entry)
 {
-	__list_del(entry->prev, entry->next);
+	__list_del_entry(entry);
 	entry->next = LIST_POISON1;
 	entry->prev = LIST_POISON2;
 }
-#else
-extern void __list_del_entry(struct list_head *entry);
-extern void list_del(struct list_head *entry);
-#endif
 
 /**
  * list_replace - replace old entry by new one
@@ -181,21 +194,12 @@ static inline int list_is_last(const struct list_head *list,
 }
 
 /**
- * list_is_valid - tests whether a list node is valid
- * @head: the list to test.
- */
-static inline int list_is_valid(const struct list_head *head)
-{
-	return !!head->next;
-}
-
-/**
  * list_empty - tests whether a list is empty
  * @head: the list to test.
  */
 static inline int list_empty(const struct list_head *head)
 {
-	return head->next == head;
+	return READ_ONCE(head->next) == head;
 }
 
 /**
@@ -390,8 +394,11 @@ static inline void list_splice_tail_init(struct list_head *list,
  *
  * Note that if the list is empty, it returns NULL.
  */
-#define list_first_entry_or_null(ptr, type, member) \
-	(!list_empty(ptr) ? list_first_entry(ptr, type, member) : NULL)
+#define list_first_entry_or_null(ptr, type, member) ({ \
+	struct list_head *head__ = (ptr); \
+	struct list_head *pos__ = READ_ONCE(head__->next); \
+	pos__ != head__ ? list_entry(pos__, type, member) : NULL; \
+})
 
 /**
  * list_next_entry - get the next element in list
@@ -617,7 +624,7 @@ static inline int hlist_unhashed(const struct hlist_node *h)
 
 static inline int hlist_empty(const struct hlist_head *h)
 {
-	return !h->first;
+	return !READ_ONCE(h->first);
 }
 
 static inline void __hlist_del(struct hlist_node *n)
@@ -651,7 +658,7 @@ static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
 	n->next = first;
 	if (first)
 		first->pprev = &n->next;
-	h->first = n;
+	WRITE_ONCE(h->first, n);
 	n->pprev = &h->first;
 }
 
@@ -662,14 +669,14 @@ static inline void hlist_add_before(struct hlist_node *n,
 	n->pprev = next->pprev;
 	n->next = next;
 	next->pprev = &n->next;
-	*(n->pprev) = n;
+	WRITE_ONCE(*(n->pprev), n);
 }
 
 static inline void hlist_add_behind(struct hlist_node *n,
 				    struct hlist_node *prev)
 {
 	n->next = prev->next;
-	prev->next = n;
+	WRITE_ONCE(prev->next, n);
 	n->pprev = &prev->next;
 
 	if (n->next)
@@ -685,6 +692,16 @@ static inline void hlist_add_fake(struct hlist_node *n)
 static inline bool hlist_fake(struct hlist_node *h)
 {
 	return h->pprev == &h->next;
+}
+
+/*
+ * Check whether the node is the only node of the head without
+ * accessing head:
+ */
+static inline bool
+hlist_is_singular_node(struct hlist_node *n, struct hlist_head *h)
+{
+	return !n->next && n->pprev == &h->first;
 }
 
 /*

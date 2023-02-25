@@ -37,6 +37,7 @@
 #include <sound/initval.h>
 #include <linux/hisi/usb/hisi_usb.h>
 #include <huawei_platform/audio/usb_audio_power.h>
+#include <huawei_platform/audio/usb_audio_power_v600.h>
 #include <linux/wakelock.h>
 
 #include "usbaudio.h"
@@ -46,6 +47,9 @@
 #include "clock.h"
 #include "usbaudio_dsp_client.h"
 #include "usbaudio_ioctl.h"
+#include "huawei_platform/log/imonitor.h"
+
+
 #ifdef CLT_AUDIO
 #include "usbaudio_test.h"
 #endif
@@ -57,10 +61,11 @@
 #define DTS_USBAUDIO_DSP_NAME "hisilicon,usbaudiodsp"
 #define HUAWEI_USB_HEADSET_PRENAME "HUAWEI USB-C"
 #define BBIITT_USB_HEADSET_PRENAME "BBIITT USB-C"
+#define USB_AUDIO_TYPEC_INFO_EVENT_ID 931001000
 
+static unsigned int insert_times;
 static DEFINE_MUTEX(connect_mutex);
 static DEFINE_MUTEX(usbaudio_wakeup_mutex);
-
 struct usbaudio_dsp_client_ops {
 	bool (*controller_switch)(struct usb_device *dev, u32 usb_id, struct usb_host_interface *ctrl_intf, int ctrlif, struct usbaudio_pcms *pcms);
 	int (*disconnect)(struct snd_usb_audio *chip, unsigned int dsp_reset_flag);
@@ -85,6 +90,8 @@ struct usbaudio_dsp  {
 	bool usbaudio_connected;
 	unsigned int dn_rate;
 	unsigned int up_rate;
+	unsigned int dn_period;
+	unsigned int up_period;
 	bool wake_up;
 };
 
@@ -221,27 +228,37 @@ int usbaudio_ctrl_set_pipeout_interface(unsigned int running, unsigned int rate)
 	return ret;
 }
 
-int usbaudio_ctrl_set_pipein_interface(unsigned int running, unsigned int rate)
+int usbaudio_ctrl_set_pipein_interface(unsigned int running, unsigned int rate, unsigned int period)
 {
-	int ret;
+	int ret = 0;
 	mutex_lock(&connect_mutex);
-	if (!usbaudio_hifi || !usbaudio_hifi->chip) {
-		ret = 0;
-	} else {
-		if (running == usbaudio_hifi->pipein_running_flag && usbaudio_hifi->up_rate == rate) {
-			pr_err("usbaudio_ctrl_set_pipein_interface RETURN. running:%d rate %d \n", running, rate);
-			ret = 0;
-		} else {
-			usbaudio_hifi->pipein_running_flag = running;
-			if (running == STOP_STREAM)
-				usbaudio_resume();
-			ret = usbaudio_hifi->ops->set_pipein_interface(usbaudio_hifi->chip, &usbaudio_hifi->pcms, running, rate);
-			usbaudio_hifi->up_rate = rate;
-			usbaudio_hifi->ops->setinterface_complete(SNDRV_PCM_STREAM_CAPTURE, running, ret, rate);
-		}
-	}
-	mutex_unlock(&connect_mutex);
 
+	if (!usbaudio_hifi || !usbaudio_hifi->chip) {
+		mutex_unlock(&connect_mutex);
+		return 0;
+	}
+
+	if (running == usbaudio_hifi->pipein_running_flag && usbaudio_hifi->up_rate == rate
+		&& usbaudio_hifi->up_period == period) {
+		mutex_unlock(&connect_mutex);
+		return 0;
+	}
+
+	pr_info("usbaudio_ctrl_set_pipein_interface: running:%d rate %d period: %d old_running: %d old_rate: %d old_period: %d\n",
+			running, rate, period, usbaudio_hifi->pipein_running_flag, usbaudio_hifi->up_rate, usbaudio_hifi->up_period);
+
+	if (running != usbaudio_hifi->pipein_running_flag || usbaudio_hifi->up_rate != rate) { /*change period do not need to update interface*/
+		if (running == STOP_STREAM) {
+			usbaudio_resume();
+		}
+		ret = usbaudio_hifi->ops->set_pipein_interface(usbaudio_hifi->chip, &usbaudio_hifi->pcms, running, rate);
+	}
+	usbaudio_hifi->pipein_running_flag = running;
+	usbaudio_hifi->up_rate = rate;
+	usbaudio_hifi->up_period = period;
+	usbaudio_hifi->ops->setinterface_complete(SNDRV_PCM_STREAM_CAPTURE, running, ret, rate);/*send complete msg to hifi*/
+
+	mutex_unlock(&connect_mutex);
 	return ret;
 }
 
@@ -275,9 +292,45 @@ void usbaudio_ctrl_query_info(struct usbaudio_info *usbinfo)
 			usbinfo->uplink_channels);
 		pr_info("usbname %s \n", usbinfo->name);
 	}
+#ifdef CLT_AUDIO
+	memcpy(usbinfo->dnlink_rate_table, usbaudio_test_get_rate_table(), sizeof(usbinfo->dnlink_rate_table));// unsafe_function_ignore: memcpy
+	usbinfo->usbid = usbaudio_test_get_usb_id();
+	pr_info("usb id is :0x%x, dlink_rate_table: %d,%d,%d,%d,%d\n", usbinfo->usbid, usbinfo->dnlink_rate_table[0],
+		usbinfo->dnlink_rate_table[1], usbinfo->dnlink_rate_table[2], usbinfo->dnlink_rate_table[3], usbinfo->dnlink_rate_table[4]);
+#endif
 	mutex_unlock(&connect_mutex);
 }
 
+static int usbaudio_ctrl_typeC_log_upload(void *data)
+{
+	struct snd_usb_audio *info = NULL;
+	struct imonitor_eventobj *obj = NULL;
+	int ret = -1;
+	if(!data){
+		pr_err("headset info is null!\n");
+		return ret;
+	}
+	info = (struct snd_usb_audio *)data;
+	insert_times++;
+	pr_info("typeC headset bcdDevice %0x, times %d\n",info->dev->descriptor.bcdDevice, insert_times);
+
+	obj = imonitor_create_eventobj(USB_AUDIO_TYPEC_INFO_EVENT_ID);
+	if(!obj){
+		pr_err("imonitor create eventobj error\n");
+		return ret;
+	}
+	imonitor_set_param_integer_v2(obj, "usbid", info->usb_id);
+	imonitor_set_param_string_v2(obj, "IC", info->dev->manufacturer);
+	imonitor_set_param_string_v2(obj, "module", info->card->shortname);
+	imonitor_set_param_string_v2(obj, "isn", info->dev->serial);
+	imonitor_set_param_integer_v2(obj, "times", insert_times);
+	imonitor_set_param_integer_v2(obj, "ver", info->dev->descriptor.bcdDevice);
+	ret = imonitor_send_event(obj);
+	if(obj){
+		imonitor_destroy_eventobj(obj);
+	}
+	return ret;
+}
 void usbaudio_ctrl_set_chip(struct snd_usb_audio *chip)
 {
 	mutex_lock(&connect_mutex);
@@ -286,11 +339,12 @@ void usbaudio_ctrl_set_chip(struct snd_usb_audio *chip)
 		if (chip->card && chip->dev->serial && chip->card->shortname && (sizeof(chip->card->shortname) <= 256)){
 			#ifdef CONFIG_HUAWEI_DSM
 			if (hisi_usb_using_hifi_usb(chip->dev))
-				audio_dsm_report_info(AUDIO_CODEC, DSM_USBAUDIO_INFO, "shortname:%s usbid %x serial %s usbphy %s \n", chip->card->shortname, chip->usb_id, chip->dev->serial, "hifi");
+				audio_dsm_report_info(AUDIO_CODEC, DSM_USBAUDIO_INFO, "usbid %x usbphy %s \n", chip->usb_id, "hifi");
 			else
-				audio_dsm_report_info(AUDIO_CODEC, DSM_USBAUDIO_INFO, "shortname:%s usbid %x serial %s  usbphy %s \n", chip->card->shortname, chip->usb_id, chip->dev->serial, "arm");
+				audio_dsm_report_info(AUDIO_CODEC, DSM_USBAUDIO_INFO, "usbid %x usbphy %s \n", chip->usb_id, "arm");
 			#endif
 			memcpy(usbaudio_hifi->info.name, chip->card->shortname, sizeof(chip->card->shortname)); /* unsafe_function_ignore: memcpy */
+			usbaudio_hifi->info.name[USBAUDIO_INFONAME_LEN - 1] = '\0';
 		}
 
 		usbaudio_hifi->chip = chip;
@@ -301,13 +355,17 @@ void usbaudio_ctrl_set_chip(struct snd_usb_audio *chip)
 		usbaudio_hifi->info.usbid = chip->usb_id;
 		send_usbaudioinfo2hifi(usbaudio_hifi->chip, &usbaudio_hifi->pcms);
 	}
-
+	if(usbaudio_ctrl_typeC_log_upload(chip) < 0){
+		 pr_err("imonitor send eventobj error\n");
+	}
 	if (chip) {
 		pr_info("usbaudio_ctrl_set_chip: usb id is 0x%x , name is %s\n", chip->usb_id, chip->card->shortname);
 		if(hisi_usb_using_hifi_usb(chip->dev)
 			&& ((!strncmp(chip->card->shortname, HUAWEI_USB_HEADSET_PRENAME, strlen(HUAWEI_USB_HEADSET_PRENAME)))
 				|| (!strncmp(chip->card->shortname, BBIITT_USB_HEADSET_PRENAME, strlen(BBIITT_USB_HEADSET_PRENAME))))) {
 			usb_audio_power_buckboost();
+			set_otg_switch_enable_v600();
+			usb_headset_plug_in();
 		}
 	}
 

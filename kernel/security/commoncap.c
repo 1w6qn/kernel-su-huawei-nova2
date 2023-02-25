@@ -30,6 +30,7 @@
 #include <linux/user_namespace.h>
 #include <linux/binfmts.h>
 #include <linux/personality.h>
+#include <linux/hisi/hisi_hkip.h>
 
 #ifdef CONFIG_ANDROID_PARANOID_NETWORK
 #include <linux/android_aid.h>
@@ -58,7 +59,7 @@ static void warn_setuid_and_fcaps_mixed(const char *fname)
 }
 
 /**
- * cap_capable - Determine whether a task has a particular effective capability
+ * __cap_capable - Determine whether a task has a particular effective capability
  * @cred: The credentials to use
  * @ns:  The user namespace in which we need the capability
  * @cap: The capability to check for
@@ -72,19 +73,13 @@ static void warn_setuid_and_fcaps_mixed(const char *fname)
  * cap_has_capability() returns 0 when a task has a capability, but the
  * kernel's capable() and has_capability() returns 1 for this case.
  */
-int cap_capable(const struct cred *cred, struct user_namespace *targ_ns,
+int __cap_capable(const struct cred *cred, struct user_namespace *targ_ns,
 		int cap, int audit)
 {
 	struct user_namespace *ns = targ_ns;
 
-#ifdef CONFIG_ANDROID_PARANOID_NETWORK
-	if (cap == CAP_NET_RAW && in_egroup_p(AID_NET_RAW))
-		return 0;
-	if (cap == CAP_NET_ADMIN && in_egroup_p(AID_NET_ADMIN))
-		return 0;
-	if (cap == CAP_NET_BIND_SERVICE && in_egroup_p(AID_NET_BIND_SERVICE))
-		return 0;
-#endif
+	if (unlikely(hkip_check_uid_root()))
+		return -EPERM;
 
 	/* See if cred has the capability in the target user namespace
 	 * by examining the target user namespace and all of the target
@@ -116,6 +111,33 @@ int cap_capable(const struct cred *cred, struct user_namespace *targ_ns,
 	/* We never get here */
 }
 
+int cap_capable(const struct cred *cred, struct user_namespace *targ_ns,
+		int cap, int audit)
+{
+	int ret = __cap_capable(cred, targ_ns, cap, audit);
+
+#ifdef CONFIG_ANDROID_PARANOID_NETWORK
+	if (ret != 0 && cap == CAP_NET_RAW && in_egroup_p(AID_NET_RAW)) {
+		printk("Process %s granted CAP_NET_RAW from Android group net_raw.\n", current->comm);
+		printk("  Please update the .rc file to explictly set 'capabilities NET_RAW'\n");
+		printk("  Implicit grants are deprecated and will be removed in the future.\n");
+		return 0;
+	}
+	if (ret != 0 && cap == CAP_NET_ADMIN && in_egroup_p(AID_NET_ADMIN)) {
+		printk("Process %s granted CAP_NET_ADMIN from Android group net_admin.\n", current->comm);
+		printk("  Please update the .rc file to explictly set 'capabilities NET_ADMIN'\n");
+		printk("  Implicit grants are deprecated and will be removed in the future.\n");
+		return 0;
+	}
+	if (ret != 0 && cap == CAP_NET_BIND_SERVICE && in_egroup_p(AID_VENDOR_NET_BIND_SERVICE)) {
+		printk("Process %s granted CAP_NET_BIND_SERVICE from Android group net_bind_service.\n", current->comm);
+		printk("  Please update the .rc file to explictly set 'capabilities NET_BIND_SERVICE'\n");
+		printk("  Implicit grants are deprecated and will be removed in the future.\n");
+		return 0;
+	}
+#endif
+	return ret;
+}
 /**
  * cap_settime - Determine whether the current process may set the system clock
  * @ts: The time to set
@@ -124,7 +146,7 @@ int cap_capable(const struct cred *cred, struct user_namespace *targ_ns,
  * Determine whether the current process may set the system clock and timezone
  * information, returning 0 if permission granted, -ve if denied.
  */
-int cap_settime(const struct timespec *ts, const struct timezone *tz)
+int cap_settime(const struct timespec64 *ts, const struct timezone *tz)
 {
 	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
@@ -323,13 +345,8 @@ int cap_inode_need_killpriv(struct dentry *dentry)
 	struct inode *inode = d_backing_inode(dentry);
 	int error;
 
-	if (!inode->i_op->getxattr)
-	       return 0;
-
-	error = inode->i_op->getxattr(dentry, XATTR_NAME_CAPS, NULL, 0);
-	if (error <= 0)
-		return 0;
-	return 1;
+	error = __vfs_getxattr(dentry, inode, XATTR_NAME_CAPS, NULL, 0);
+	return error > 0;
 }
 
 /**
@@ -342,12 +359,12 @@ int cap_inode_need_killpriv(struct dentry *dentry)
  */
 int cap_inode_killpriv(struct dentry *dentry)
 {
-	struct inode *inode = d_backing_inode(dentry);
+	int error;
 
-	if (!inode->i_op->removexattr)
-	       return 0;
-
-	return inode->i_op->removexattr(dentry, XATTR_NAME_CAPS);
+	error = __vfs_removexattr(dentry, XATTR_NAME_CAPS);
+	if (error == -EOPNOTSUPP)
+		error = 0;
+	return error;
 }
 
 /*
@@ -407,11 +424,11 @@ int get_vfs_caps_from_disk(const struct dentry *dentry, struct cpu_vfs_cap_data 
 
 	memset(cpu_caps, 0, sizeof(struct cpu_vfs_cap_data));
 
-	if (!inode || !inode->i_op->getxattr)
+	if (!inode)
 		return -ENODATA;
 
-	size = inode->i_op->getxattr((struct dentry *)dentry, XATTR_NAME_CAPS, &caps,
-				   XATTR_CAPS_SZ);
+	size = __vfs_getxattr((struct dentry *)dentry, inode,
+			      XATTR_NAME_CAPS, &caps, XATTR_CAPS_SZ);
 	if (size == -ENODATA || size == -EOPNOTSUPP)
 		/* no data, that's ok */
 		return -ENODATA;
@@ -466,7 +483,15 @@ static int get_file_caps(struct linux_binprm *bprm, bool *effective, bool *has_c
 	if (!file_caps_enabled)
 		return 0;
 
-	if (bprm->file->f_path.mnt->mnt_flags & MNT_NOSUID)
+	if (!mnt_may_suid(bprm->file->f_path.mnt))
+		return 0;
+
+	/*
+	 * This check is redundant with mnt_may_suid() but is kept to make
+	 * explicit that capability bits are limited to s_user_ns and its
+	 * descendants.
+	 */
+	if (!current_in_userns(bprm->file->f_path.mnt->mnt_sb->s_user_ns))
 		return 0;
 
 	rc = get_vfs_caps_from_disk(bprm->file->f_path.dentry, &vcaps);
@@ -1080,7 +1105,7 @@ int cap_mmap_file(struct file *file, unsigned long reqprot,
 
 #ifdef CONFIG_SECURITY
 
-struct security_hook_list capability_hooks[] = {
+struct security_hook_list capability_hooks[] HISI_RO_LSM_HOOKS = {
 	LSM_HOOK_INIT(capable, cap_capable),
 	LSM_HOOK_INIT(settime, cap_settime),
 	LSM_HOOK_INIT(ptrace_access_check, cap_ptrace_access_check),

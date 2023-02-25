@@ -28,6 +28,12 @@
 #define NETLINK_RDMA		20
 #define NETLINK_CRYPTO		21	/* Crypto layer */
 
+#ifdef CONFIG_CHR_NETLINK_MODULE
+#define NETLINK_CHR_EVENT_NL  23
+#endif
+#ifdef CONFIG_HW_WIFIPRO
+#define NETLINK_WIFIPRO_EVENT_NL  24
+#endif
 #ifdef CONFIG_HW_DPIMARK_MODULE
 #define NETLINK_HW_DPI	25
 #endif
@@ -37,23 +43,14 @@
 #define NETLINK_WIFI_SDT_HISI   28
 #endif
 
-#ifdef CONFIG_CHR_NETLINK_MODULE
-#define NETLINK_CHR_EVENT_NL  23
-#endif
-#ifdef CONFIG_HW_WIFIPRO
-#define NETLINK_WIFIPRO_EVENT_NL  24
-#endif
-
-
-#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
-#define NETLINK_ASPEN		26
-#endif
-
 #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
+#define NETLINK_HW_LOGCAT     29
 
 #ifdef CONFIG_HUAWEI_KSTATE
 #define NETLINK_HW_KSTATE	30	/* kstate send event to user */
 #endif
+
+#define NETLINK_HW_LOGCAT_EXT 31
 
 /*netd communicate with hwfilter */
 #ifdef CONFIG_HW_NETFILTER_MODULE
@@ -68,13 +65,28 @@
 #define NETLINK_EMCOM 35
 #endif
 
+#ifdef CONFIG_RIL_SIM_NETLINK_MODULE
+#define NETLINK_RIL_EVENT_SIM  36
+#endif
+
+#ifdef CONFIG_HW_NETBOOSTER_MODULE
+#define NETLINK_NETBOOSTER  37
+#endif
+
+#ifdef CONFIG_HISI_CAMERA_VL53L0_970
+#define NETLINK_ST_LASER_DRIVER 38
+#endif
+
+#ifdef CONFIG_HUAWEI_EIMA_ACCESS_CONTROL
+#define NETLINK_EIMA 39
+#endif
 
 #if (defined(CONFIG_HW_CPULOAD_NOTI) || defined(CONFIG_HW_VIP_THREAD) \
         || defined(CONFIG_HW_IAWARE_THREAD_BOOST))
 #define NETLINK_HW_IAWARE_CPU 33
-#define MAX_LINKS 36
+#define MAX_LINKS 40
 #else
-#define MAX_LINKS 36
+#define MAX_LINKS 40
 #endif
 
 struct sockaddr_nl {

@@ -2,17 +2,20 @@
 # Makefile for the linux kernel.
 #
 
+ccflags-y := -fno-function-sections -fno-data-sections
+
 obj-y                          := main.o version.o mounts.o
 obj-y                          += noinitramfs.o
 obj-$(CONFIG_BLK_DEV_INITRD)   += initramfs.o
 obj-$(CONFIG_GENERIC_CALIBRATE_DELAY) += calibrate.o
+obj-$(CONFIG_ANDROID_SAR_RAMDISK) += sar_ramdisk/
 
 ifneq ($(CONFIG_ARCH_INIT_TASK),y)
 obj-y                          += init_task.o
 endif
 
 ifeq ($(TARGET_BUILD_VARIANT),eng)
-EXTRA_CFLAGS += -DHISI_SN_CMDLINE
+EXTRA_CFLAGS += -DCMDLINE_INFO_FILTER
 endif
 
 mounts-y			:= do_mounts.o

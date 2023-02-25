@@ -750,31 +750,33 @@ void hifi_samplerate_table_filled(struct audioformat *fp, struct usbaudio_format
 	int i;
 	unsigned int rate = 0;
 
-	for (i = 0; i < 5; i++) {
+	for (i = 0; i < ARRAY_SIZE(fmt->rate_table); i++) {
 		fmt->rate_table[i] = 0;
 	}
 
 	for (i = 0; i < fp->nr_rates; i++) {
-		if (is_customized_headset(usb_id)) {
-			rate = fp->rate_table[i];
-		} else {
-			rate = pcm_cfg[SNDRV_PCM_STREAM_PLAYBACK].rates;
-		}
+		rate = fp->rate_table[i];
 		switch (rate) {
 		case 44100:
-			fmt->rate_table[0] = 44100;
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_44100] = 44100;
 			break;
 		case 48000:
-			fmt->rate_table[1] = 48000;
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_48000] = 48000;
+			break;
+		case 88200:
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_88200] = 88200;
 			break;
 		case 96000:
-			fmt->rate_table[2] = 96000;
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_96000] = 96000;
+			break;
+		case 176400:
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_176400] = 176400;
 			break;
 		case 192000:
-			fmt->rate_table[3] = 192000;
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_192000] = 192000;
 			break;
 		case 384000:
-			fmt->rate_table[4] = 384000;
+			fmt->rate_table[USBAUDIO_TABLE_SAMPLERATE_384000] = 384000;
 			break;
 		default:
 			pr_err("rata table do not contain this rate, %d\n", rate);
@@ -1022,25 +1024,34 @@ static void _customsized_headset_volume_set(struct usb_device *dev, u32 usb_id)
 bool controller_switch(struct usb_device *dev, u32 usb_id, struct usb_host_interface *ctrl_intf, int ctrlif, struct usbaudio_pcms *pcms)
 {
 	int ret = 0;
-	if ((!hisi_usb_using_hifi_usb(dev)) && is_usbaudio_device(dev) && !is_special_usbid(usb_id) && is_match_hifi_format(dev, usb_id, ctrl_intf, ctrlif, pcms)) {
-		/* set volume for huawei headset */
-		_customsized_headset_volume_set(dev, usb_id);
-
-		ret = usbaudio_nv_check();
-		if (ret == 0) {
-			/* Some special device need reset power */
-			if (usb_id == USB_ID(0x262a, 0x1534)) {
-				if (!hisi_usb_start_hifi_usb_reset_power())
+	if (is_usbaudio_device(dev) && !is_special_usbid(usb_id) && is_match_hifi_format(dev, usb_id, ctrl_intf, ctrlif, pcms)) {
+		if (!hisi_usb_using_hifi_usb(dev)) {
+			ret = usbaudio_nv_check();
+			if (ret == 0) {
+				/* Some special device need reset power */
+				if (usb_id == USB_ID(0x262a, 0x1534)) {
+					if (!hisi_usb_start_hifi_usb_reset_power())
+						return true;
+				} else if (!hisi_usb_start_hifi_usb()) {
 					return true;
-			} else if (!hisi_usb_start_hifi_usb()) {
+				} else {
+					pr_err("start hifi usb fail \n");
+				}
+			} else if (ret == -ETIME) {
 				return true;
 			} else {
-				pr_err("start hifi usb fail \n");
+				pr_err("nv check intime %d\n", ret);
+				return true;
 			}
-		} else if (ret == -ETIME) {
-			return true;
 		} else {
-			pr_err("nv check intime %d\n", ret);
+			/* set volume for huawei headset */
+			_customsized_headset_volume_set(dev, usb_id);
+			pr_info("already using hifiusb\n");
+		}
+	} else {
+		if (hisi_usb_using_hifi_usb(dev)) {
+			pr_info("using hifiuusb, switch to arm usb\n");
+			hisi_usb_stop_hifi_usb();
 			return true;
 		}
 	}
@@ -1053,7 +1064,7 @@ bool send_usbaudioinfo2hifi(struct snd_usb_audio *chip, struct usbaudio_pcms *pc
 	int i = 0;
 	if (hisi_usb_using_hifi_usb(chip->dev)) {
 		if(0 == usbaudio_probe_msg(pcms)) {
-			for (i = 0; i < 2; i++) {
+			for (i = 0; i < USBAUDIO_PCM_NUM; i++) {
 				pr_err("-----------begin \n");
 				pr_err("formats %llx channels %d fmt_type %d frame_size %d iface %d altsetting %d altset_idx %d attributes %d endpoint %d ep_attr %d datainterval %d protocol %d maxpacksize %d rates %d clock %d\n",
 				pcms->fmts[i].formats,

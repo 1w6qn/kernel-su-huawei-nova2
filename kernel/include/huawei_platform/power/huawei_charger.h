@@ -21,7 +21,11 @@
 #include <huawei_platform/usb/hw_typec_dev.h>
 #include <huawei_platform/usb/hw_typec_platform.h>
 #include <huawei_platform/usb/hw_pd_dev.h>
-#include <dsm/dsm_pub.h>
+
+#include <huawei_platform/power/power_dsm.h>
+#include <huawei_platform/power/huawei_charger_power_interface.h>
+#include <huawei_platform/power/power_debug.h>
+
 #ifdef CONFIG_DIRECT_CHARGER
 #include <huawei_platform/power/direct_charger.h>
 #endif
@@ -35,18 +39,26 @@
 #define FALSE (0)
 #endif
 #define get_index(x) (x-ERROR_FCP_VOL_OVER_HIGH)
-#define ERR_NO_STRING_SIZE 128
+#define ERR_NO_STRING_SIZE 256
 #define CHARGELOG_SIZE      (4096)
 #define CHARGE_DMDLOG_SIZE      (2048)
 #define CHARGE_SYSFS_BUF_SIZE	10
 #define CHIP_RESP_TIME	200
 
-#define NONSTAND_ICO_CNT 3
-#define USB_ICO_CNT 2
+#define TERM_ERR_CNT 10
+
+/* sensor_id#scene_id#stage */
+#define THERMAL_REASON_SIZE    16
+
+#define HIZ_MODE_ENABLE 1
+#define HIZ_MODE_DISABLE 0
+
 /*charge threshold*/
 #define NO_CHG_TEMP_LOW     (0)
 #define NO_CHG_TEMP_HIGH    (50)
+#define BATT_EXIST_TEMP_LOW (-40)
 #define DEFAULT_NORMAL_TEMP (25)
+
 
 #define CHARGER_NOT_DBC_CONTROL 2 /*0:dbc close charger,1:dbc open charger,2:dbc not control charger*/
 
@@ -54,6 +66,8 @@
 #define FCP_ADAPTER_DETECT_FAIL 1
 #define FCP_ADAPTER_DETECT_SUCC 0
 #define FCP_ADAPTER_DETECT_OTHER -1
+
+#define FCP_CHECK_CNT_MAX     3
 
 /*fcp adapter status */
 #define FCP_ADAPTER_STATUS 0x28
@@ -63,6 +77,8 @@
 
 /*options of charge current(include input current & charge into battery current)*/
 #define CHARGE_CURRENT_0000_MA            (0)
+#define CHARGE_CURRENT_0100_MA            (100)
+#define CHARGE_CURRENT_0150_MA            (150)
 #define CHARGE_CURRENT_0500_MA            (500)
 #define CHARGE_CURRENT_0800_MA            (800)
 #define CHARGE_CURRENT_1000_MA            (1000)
@@ -71,6 +87,8 @@
 #define CHARGE_CURRENT_2000_MA            (2000)
 #define CHARGE_CURRENT_4000_MA            (4000)
 #define CHARGE_CURRENT_MAX_MA            (32767)
+
+#define CHARGE_CURRENT_DELAY 100
 
 /*options of battery voltage*/
 #define BATTERY_VOLTAGE_0000_MV             (0)
@@ -91,17 +109,34 @@
 #define BATTERY_TEMPERATURE_0_C             (0)
 #define BATTERY_TEMPERATURE_5_C             (5)
 
+#define BATT_BRAND_STRING_MAX                32
+#define BATT_BRAND_NUM_MAX                   5
+
 #define CHARGING_WORK_TIMEOUT                (30000)
+#define CHARGING_WORK_PDTOSCP_TIMEOUT        1000
+#define CHARGING_WORK_WAITPD_TIMEOUT         2000
 #define MIN_CHARGING_CURRENT_OFFSET          (-10)
 #define BATTERY_FULL_CHECK_TIMIES            (2)
+#define IIN_AVG_SAMPLES                      (10)
+#define IMPOSSIBLE_IIN                       (999999)
+#define CURRENT_FULL_CHECK_TIMES             (3)
+#define DELA_ICHG_FOR_CURRENT_FULL           (30)
+#define CURRENT_FULL_VOL_OFFSET              (50)
+#define CURRENT_FULL_VALID_PERCENT           (80)
+#define CAP_TH_FOR_CURRENT_FULL              (80)
 
 #define WATCHDOG_TIMER_DISABLE     (0)
 #define WATCHDOG_TIMER_40_S     (40)
 #define WATCHDOG_TIMER_80_S     (80)
 
+#define ADAPTER_0V                    (0)
 #define ADAPTER_5V                    (5)
 #define ADAPTER_9V                    (9)
 #define ADAPTER_12V                   (12)
+
+#define PD_ADAPTER_5V              (5000)
+#define PD_ADAPTER_9V              (9000)
+#define PD_ADAPTER_12V            (12000)
 
 /*options of charge voltage (for dpm voltage setting,also ovp & uvp protect)*/
 #define CHARGE_VOLTAGE_4360_MV    (4360)
@@ -148,23 +183,61 @@
 #define ADAPTOR_TEST_START          (1)
 #define MIN_ADAPTOR_TEST_INS_NUM    (0)
 #define MAX_ADAPTOR_TEST_INS_NUM    (5)
+#define MAX_EVENT_COUNT 16
+#define EVENT_QUEUE_UNIT MAX_EVENT_COUNT
+#define WEAKSOURCE_CNT 3
 
 #define CHARGER_SET_DISABLE_FLAGS           1
 #define CHARGER_CLEAR_DISABLE_FLAGS         0
+
 /* vbus valid check timeout on powerdown charging  */
 #define VBUS_VALID_CHECK_WORK_TIMEOUT  (3000)
+#define PD_VOLTAGE_CHANGE_WORK_TIMEOUT (2000)
 
-#define CCAFC_PATTERN_SIZE     (6)
-#define CCAFC_STRING_LENGTH    (72)
-#define CCAFC_STRING_SPACE_NUM (18)
-#define CCAFC_CURRENT_LOCATION (6)
-#define CCAFC_VOLTAGE_LOCATION (12)
+#define OTG_ENABLE                     (1)
+#define OTG_DISABLE                    (0)
+
+#define CCAFC_PATTERN_SIZE	(6)
+#define CCAFC_STRING_LENGTH	(72)
+#define CCAFC_STRING_SPACE_NUM	(18)
+#define CCAFC_CURRENT_LOCATION	(6)
+#define CCAFC_VOLTAGE_LOCATION	(12)
+#define RET_ERR			(-1)
+#define RET_OK			(0)
+
+#define IIN_REGL_INTERVAL_DEFAULT      500
+#define IIN_REGL_STAGE_MAX             20
+
 /*************************struct define area***************************/
 enum charger_charging_event {
 	CHARGER_START_CHARGING_EVENT = 0,
 	CHARGER_STOP_CHARGING_EVENT,
+	CHARGER_CHARGING_DONE_EVENT,
 };
-enum usb_charger_type {
+
+enum charger_event_type {
+	START_SINK = 0,
+	STOP_SINK,
+	START_SOURCE,
+	STOP_SOURCE,
+	START_SINK_WIRELESS,
+	STOP_SINK_WIRELESS,
+	CHARGER_MAX_EVENT,
+};
+enum reset_adapter_source_type {
+	RESET_ADAPTER_SYSFS = 0,
+	RESET_ADAPTER_WIRELESS_TX,
+	RESET_ADAPTER_TOTAL,
+};
+enum otg_ctrl_type {
+	OTG_CTRL_WIRED_OTG = 0,
+	OTG_CTRL_WIRELESS_TX,
+	OTG_CTRL_DC,
+	OTG_CTRL_AUDIO,
+	OTG_CTRL_TOTAL,
+};
+
+enum huawei_usb_charger_type {
 	CHARGER_TYPE_USB = 0,	/*SDP*/
 	CHARGER_TYPE_BC_USB,	/*CDP*/
 	CHARGER_TYPE_NON_STANDARD,	/*UNKNOW*/
@@ -175,6 +248,8 @@ enum usb_charger_type {
 	CHARGER_TYPE_VR,        /*VR charger*/
 	CHARGER_TYPE_TYPEC,        /*PD charger*/
 	CHARGER_TYPE_PD,        /*PD charger*/
+	CHARGER_TYPE_SCP, /*SCP charger*/
+	CHARGER_TYPE_WIRELESS,  /*wireless charger*/
 };
 
 enum charge_fault_type {
@@ -227,10 +302,10 @@ enum charge_sysfs_type {
 	CHARGE_SYSFS_DBC_CHARGE_DONE,
 	CHARGE_SYSFS_ADAPTOR_TEST,
 	CHARGE_SYSFS_ADAPTOR_VOLTAGE,
-};
-enum cca_sysfs_type {
-        CCA_SYSFS_CCA_CHARGE_PATTERN = 0,
-        CCA_SYSFS_CCA_CCCV_SAMPLE,
+	CHARGE_SYSFS_PLUGUSB,
+	CHARGE_SYSFS_THERMAL_REASON,
+	CHARGE_SYSFS_CCA_CHARGE_PATTERN,
+	CHARGE_SYSFS_CCA_CCCV_SAMPLE,
 };
 enum charge_done_type {
 	CHARGE_DONE_NON = 0,
@@ -265,8 +340,11 @@ enum fcp_test_result{
 enum disable_charger_type {
 	CHARGER_SYS_NODE = 0,
 	CHARGER_FATAL_ISC_TYPE,
+	CHARGER_WIRELESS_TX,
+	BATT_CERTIFICATION_TYPE,
 	__MAX_DISABLE_CHAGER,
 };
+
 static const char *const fcp_check_stage[] = {
 	[0] = "FCP_STAGE_DEFAUTL",
 	[1] = "FCP_STAGE_SUPPORT_DETECT",
@@ -274,9 +352,15 @@ static const char *const fcp_check_stage[] = {
 	[3] = "FCP_STAGE_ADAPTER_ENABLE",
 	[4] = "FCP_STAGE_SUCESS",
 };
-
+struct charger_event_queue {
+	enum charger_event_type *event;
+	unsigned int num_event;
+	unsigned int max_event;
+	unsigned int enpos, depos;
+	unsigned int overlay, overlay_index;
+};
 struct ico_input {
-	enum usb_charger_type charger_type;
+	enum huawei_usb_charger_type charger_type;
 	unsigned int iin_max;
 	unsigned int ichg_max;
 	unsigned int vterm;
@@ -285,7 +369,10 @@ struct ico_output {
 	unsigned int input_current;
 	unsigned int charge_current;
 };
-
+struct chip_init_crit {
+	enum huawei_usb_charger_type charger_type;
+	int vbus;
+};
 struct charge_sysfs_data {
 	unsigned int adc_conv_rate;
 	unsigned int iin_thl;
@@ -302,7 +389,6 @@ struct charge_sysfs_data {
 	unsigned int charge_enable;
 	unsigned int disable_charger[__MAX_DISABLE_CHAGER];
 	unsigned int batfet_disable;
-	unsigned int hiz_enable;
 	unsigned int vr_charger_type;
 	unsigned int dbc_charge_control;
 	enum charge_done_type charge_done_status;
@@ -356,11 +442,20 @@ struct charge_core_data {
 	unsigned int temp_level;
 	unsigned int high_temp_limit;
 	bool warm_triggered;
+#ifdef CONFIG_WIRELESS_CHARGER
+	unsigned int iin_wireless;
+	unsigned int ichg_wireless;
+#endif
 	unsigned int vterm_basp;
 };
 
+struct charge_iin_regl_lut {
+	int total_stage;
+	int *iin_regl_para;
+};
+
 struct charge_device_ops {
-	int (*chip_init)(void);
+	int (*chip_init)(struct chip_init_crit* init_crit);
 	int (*set_adc_conv_rate)(int rate_mode);
 	int (*set_input_current)(int value);
 	void (*set_input_current_thermal)(int val1, int val2);
@@ -386,11 +481,13 @@ struct charge_device_ops {
 	int (*get_vbus)(unsigned int *value);
 	int (*check_charger_plugged)(void);
 	int (*check_input_dpm_state)(void);
-	int (*fcp_chip_init)(void);
+	int (*check_input_vdpm_state)(void);
+	int (*check_input_idpm_state)(void);
 	int (*set_covn_start)(int enable);
 	int (*set_charger_hiz)(int enable);
 	int (*set_otg_current)(int value);
 	int (*stop_charge_config)(void);
+        int (*set_otg_switch_mode_enable)(int enable);
 	int (*get_vbat_sys)(void);
 	int (*set_vbus_vset)(u32);
 	int (*set_uvp_ovp)(void);
@@ -400,6 +497,9 @@ struct charge_device_ops {
 	int (*soft_vbatt_ovp_protect)(void);
 	int (*rboost_buck_limit)(void);
 	int (*get_charge_current)(void);
+	int (*get_iin_set)(void);
+	int (*set_boost_voltage)(int voltage);
+	int (*get_dieid)(char *dieid, unsigned int len);
 };
 struct water_detect_ops {
 	int (*is_water_intrused)(void);
@@ -412,7 +512,7 @@ struct charge_switch_ops {
 
 struct fcp_adapter_device_ops {
 	int (*get_adapter_output_current)(void);
-	int (*set_adapter_output_vol)(int *);
+	int (*set_adapter_output_vol)(int);
 	int (*detect_adapter)(void);
 	int (*is_support_fcp)(void);
 	int (*switch_chip_reset)(void);
@@ -434,9 +534,8 @@ struct charge_device_info {
 	struct delayed_work charge_work;
 	struct delayed_work otg_work;
 	struct delayed_work plugout_uscp_work;
-	struct workqueue_struct *vbat_ovp_handle_wq;
+	struct delayed_work pd_voltage_change_work;
 	struct work_struct usb_work;
-	struct work_struct vbat_ovp_work;
 	struct work_struct fault_work;
 	struct charge_device_ops *ops;
 	struct charge_switch_ops *sw_ops;
@@ -444,6 +543,7 @@ struct charge_device_info {
 	struct charge_core_data *core_data;
 	struct charge_sysfs_data sysfs_data;
 	struct hrtimer timer;
+	struct mutex mutex_hiz;
 #ifdef CONFIG_TCPC_CLASS
 	struct notifier_block tcpc_nb;
 	struct tcpc_device *tcpc;
@@ -453,7 +553,7 @@ struct charge_device_info {
 #endif
 	unsigned int pd_input_current;
 	unsigned int pd_charge_current;
-	enum usb_charger_type charger_type;
+	enum huawei_usb_charger_type charger_type;
 	enum typec_input_current typec_current_mode;
 	enum power_supply_type charger_source;
 	enum charge_fault_type charge_fault;
@@ -462,24 +562,55 @@ struct charge_device_info {
 	unsigned int charge_current;
 	unsigned int input_typec_current;
 	unsigned int charge_typec_current;
+	unsigned int enable_current_full;
+	unsigned int check_current_full_count;
 	unsigned int check_full_count;
 	unsigned int is_dual_charger;
 	unsigned int start_attemp_ico;
-	unsigned int support_usb_nonstandard_ico;
 	unsigned int support_standard_ico;
 	unsigned int ico_current_mode;
 	unsigned int ico_all_the_way;
 	unsigned int water_check_enabled;
 	unsigned int fcp_vindpm;
-	int pmu_ovp_detect_flag;
+	unsigned int hiz_ref;
+	unsigned int check_ibias_sleep_time;
 #ifdef CONFIG_DIRECT_CHARGER
 	int ignore_pluggin_and_plugout_flag;
+	int support_scp_power;
 #endif
 	int reset_adapter;
+#ifdef CONFIG_WIRELESS_CHARGER
+	struct notifier_block wireless_nb;
+	int wireless_vbus;
+	int otg_channel;
+	int gpio_otg_switch;
+	unsigned int iin_limit;
+#endif
+	int weaksource_cnt;
+	struct mutex event_type_lock;
 	unsigned int charge_done_maintain_fcp;
+	unsigned int term_exceed_time;
+	struct work_struct event_work;
+	spinlock_t event_spin_lock;
+	enum charger_event_type event;
+	struct charger_event_queue event_queue;
 	struct delayed_work vbus_valid_check_work;
+	int clear_water_intrused_flag_after_read;
+	char thermal_reason[THERMAL_REASON_SIZE];
+	int avg_iin_ma;
+	int max_iin_ma;
+	int current_full_status;
+#ifdef CONFIG_HUAWEI_YCABLE
+	struct notifier_block ycable_nb;
+#endif
+	int iin_regulation_enabled;
+	int iin_regl_interval;
+	int iin_now;
+	int iin_target;
+	struct mutex iin_regl_lock;
+	struct charge_iin_regl_lut iin_regl_lut;
+	struct delayed_work iin_regl_work;
 };
-
 enum charge_wakelock_flag {
 	CHARGE_NEED_WAKELOCK,
 	CHARGE_NO_NEED_WAKELOCK,
@@ -490,6 +621,8 @@ enum adaptor_name {
 	TYPE_SCP,
 	TYPE_FCP,
 	TYPE_PD,
+	TYPE_SC,
+	TYPE_OTHER,
 };
 enum test_state {
 	DETECT_FAIL = 0,
@@ -504,36 +637,10 @@ struct adaptor_test_attr{
 
 /*fast charging pattern calculate by cca*/
 struct ccafc_charge_pattern {
-    int ccafc_current[CCAFC_PATTERN_SIZE];
-    int ccafc_voltage[CCAFC_PATTERN_SIZE];
-    int ccafc_mode[CCAFC_PATTERN_SIZE];
+	int ccafc_current[CCAFC_PATTERN_SIZE];
+	int ccafc_voltage[CCAFC_PATTERN_SIZE];
+	int ccafc_mode[CCAFC_PATTERN_SIZE];
 };
-
-#ifdef CONFIG_LLT_TEST
-struct charge_static_ops {
-	void (*charge_wake_lock)(void);
-	void (*charge_wake_unlock)(void);
-	void (*charge_rename_charger_type)(enum hisi_charger_type,
-					    struct charge_device_info *);
-	void (*charge_update_charger_type)(struct charge_device_info *);
-	void (*charge_send_uevent)(struct charge_device_info *);
-	int (*fcp_start_charging)(struct charge_device_info *);
-	void (*charge_vbus_voltage_check)(struct charge_device_info *);
-	void (*charge_update_vindpm)(struct charge_device_info *);
-	void (*charge_typec_current)(struct charge_device_info *);
-	void (*charge_select_charging_current)(struct charge_device_info *);
-	int (*charge_is_charging_full)(struct charge_device_info *);
-	void (*charge_update_status)(struct charge_device_info *);
-	void (*charge_turn_on_charging)(struct charge_device_info *);
-	int (*charge_suspend)(struct platform_device *, pm_message_t);
-	int (*charge_resume)(struct platform_device *, pm_message_t);
-	enum fcp_check_stage_type *fcp_stage;
-	struct wake_lock *charge_lock;
-	struct charge_device_info **g_di;
-	bool *charge_done_sleep_dts;
-	enum charge_wakelock_flag *charge_lock_flag;
-};
-#endif
 
 #define WDT_TIME_80_S 80
 #define WDT_STOP 0
@@ -544,11 +651,20 @@ struct charge_static_ops {
 #define WEAKSOURCE_TRUE  (1)
 #define WEAKSOURCE_FALSE (0)
 #define FCP_DETECT_DELAY_IN_POWEROFF_CHARGE 2000
+#define ASW_PROTECT_IIN_LIMIT  100
 /****************variable and function declarationn area******************/
 extern struct blocking_notifier_head charge_wake_unlock_list;
 extern struct atomic_notifier_head fault_notifier_list;
 extern struct device *charge_dev;
 extern unsigned int get_pd_charge_flag(void);
+#ifdef CONFIG_HISI_ASW
+extern int asw_get_iin_limit(void);
+#else
+static inline int asw_get_iin_limit(void)
+{
+	return 0;
+}
+#endif /* CONFIG_HISI_ASW */
 
 int water_detect_ops_register(struct water_detect_ops *ops);
 void water_detect(void);
@@ -556,16 +672,12 @@ int charge_ops_register(struct charge_device_ops *ops);
 int charge_switch_ops_register(struct charge_switch_ops *ops);
 int fcp_adapter_ops_register(struct fcp_adapter_device_ops *ops);
 void charge_type_dcp_detected_notify(void);
-int dsm_report(int err_no, void *buf);
 int fcp_test_is_support(void);
 int fcp_test_detect_adapter(void);
-enum usb_charger_type charge_get_charger_type(void);
 enum fcp_check_stage_type fcp_get_stage_status(void);
 int get_fcp_charging_flag(void);
-int vbat_ovp_fcp_adaptor_reset(void);
 int charge_set_input_current(int iset);
-void vbat_ovp_send_uevent(void);
-void charge_set_hiz_enable(int enable);
+int charge_get_charger_iinlim_regval(void);
 void chg_set_adaptor_test_result(enum adaptor_name charger_type, enum test_state result);
 enum charge_done_type get_charge_done_type(void);
 #ifdef CONFIG_TCPC_CLASS
@@ -579,11 +691,29 @@ void ignore_pluggin_and_pluggout_interrupt(void);
 void restore_pluggin_pluggout_interrupt(void);
 int get_direct_charge_flag(void);
 #endif
-extern int set_charger_disable_flags(int, int);
+#ifdef CONFIG_WIRELESS_CHARGER
+void charge_set_input_current_prop(int iin_step, int iin_delay);
+void wireless_channel_off_update_charger_type(void);
+void wireless_charge_connect_send_uevent(void);
+#endif
+int disable_chargers(int charger_type, int disable, int role);
+int set_charger_disable_flags(int, int);
+int set_charger_disable_flags_sh(unsigned int, enum disable_charger_type);
 extern struct blocking_notifier_head charger_event_notify_head;
+
 int charge_get_vbus(void);
+void charge_set_charger_type(enum huawei_usb_charger_type type);
+void charger_source_sink_event(enum charger_event_type event);
+void send_water_intrused_event(bool flag);
+bool get_stop_charge_sync_flag(void);
+int charge_otg_mode_enable(int enable, enum otg_ctrl_type type);
+void charge_set_adapter_voltage(int val, enum reset_adapter_source_type type, unsigned int delay_time);
+int charge_set_input_current_max(void);
+bool charge_get_hiz_state(void);
+int charge_set_hiz_enable(int enable);
+void charge_set_batfet_disable(int val);
 int is_ccafc_supported(int *flag);
 int get_ccafc_pattern(struct ccafc_charge_pattern *pattern);
 int get_ccafc_sample_status(void);
-
+void emark_detect_complete(void);
 #endif

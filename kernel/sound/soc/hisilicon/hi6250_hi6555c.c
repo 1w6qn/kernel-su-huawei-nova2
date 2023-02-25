@@ -60,19 +60,33 @@ static struct snd_soc_dai_link hi6250_hi6555c_dai_link[] =
         .platform_name  = "hi6210-hifi",
     },
     {
-        .name           = "BT_hi6555c",
-        .stream_name    = "BT_hi6555c",
-        .cpu_dai_name   = "hi6210-bt",
-        .codec_dai_name = "hi6555c-dai",
-        .platform_name  = "hi6210-hifi",
-    },
-    {
         .name           = "LPP_hi6555c",
         .stream_name    = "LPP_hi6555c",
         .cpu_dai_name   = "hi6210-lpp",
         .codec_dai_name = "hi6555c-dai",
         .platform_name  = "hi6210-hifi",
     },
+	{
+		.name           = "direct_hi6555c",
+		.stream_name    = "hi3660_hi6403_pb_direct",
+		.cpu_dai_name   = "hi6210-direct",
+		.codec_dai_name = "hi6555c-dai",
+		.platform_name  = "hi6210-hifi",
+	},
+	{
+		.name           = "lowlatency_hi6555c",
+		.stream_name    = "lowlatency_hi6555c",
+		.cpu_dai_name   = "hi6210-fast",
+		.codec_dai_name = "hi6555c-dai",
+		.platform_name  = "hi6210-hifi",
+	},
+	{
+		.name           = "mmap_hi6555c",
+		.stream_name    = "mmap_hi6555c",
+		.cpu_dai_name   = "hisi-pcm-mmap",
+		.codec_dai_name = "hi6555c-dai",
+		.platform_name  = "hi6210-hifi",
+	},
 };
 
 #ifdef CONFIG_AK4376_KERNEL_4_1
@@ -83,7 +97,7 @@ static int hi6250_ak4376_hw_params(struct snd_pcm_substream *substream,
     struct snd_soc_dai *codec_dai = rtd->codec_dai;
     unsigned int fmt = 0;
     int ret = 0;
-    
+
     switch (params_channels(params)) {
         case 2: /* Stereo I2S mode */
             fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS;
@@ -91,21 +105,21 @@ static int hi6250_ak4376_hw_params(struct snd_pcm_substream *substream,
         default:
             return -EINVAL;
     }
-    
+
     /* Set codec DAI configuration */
     ret = snd_soc_dai_set_fmt(codec_dai, fmt);
     if (ret < 0) {
         pr_err("%s : set codec DAI configuration failed %d\n", __FUNCTION__, ret);
         return ret;
     }
-    
+
     /* set the codec mclk */
     ret = snd_soc_dai_set_sysclk(codec_dai, 0, AK4376_MCLK_FERQ, SND_SOC_CLOCK_IN);
     if (ret < 0) {
         pr_err("%s : set codec system clock failed %d\n", __FUNCTION__, ret);
         return ret;
     }
-    
+
     return 0;
 }
 
@@ -166,6 +180,7 @@ static int hi6250_hi6555c_probe(struct platform_device *pdev)
     struct device_node  *codec_np       = NULL;
     struct snd_soc_card *card           = &snd_soc_hi6250_hi6555c;
     struct device_node  *np             = NULL;
+	uint32_t i = 0;
 #ifdef CONFIG_AK4376_KERNEL_4_1
     const char *extern_codec_type       = "huawei,extern_codec_type";
     const char *ptr = NULL;
@@ -186,11 +201,9 @@ static int hi6250_hi6555c_probe(struct platform_device *pdev)
         return -EINVAL;
     }
 
-    hi6250_hi6555c_dai_link[0].codec_of_node = codec_np;
-    hi6250_hi6555c_dai_link[1].codec_of_node = codec_np;
-    hi6250_hi6555c_dai_link[2].codec_of_node = codec_np;
-    hi6250_hi6555c_dai_link[3].codec_of_node = codec_np;
-    hi6250_hi6555c_dai_link[4].codec_of_node = codec_np;
+	for (i = 0; i < ARRAY_SIZE(hi6250_hi6555c_dai_link); i++) {
+		hi6250_hi6555c_dai_link[i].codec_of_node = codec_np;
+	}
 
 #ifdef CONFIG_AK4376_KERNEL_4_1
     /* add akm4376 devices */

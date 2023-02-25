@@ -22,7 +22,7 @@
 #ifndef __LINUX_TPM_H__
 #define __LINUX_TPM_H__
 
-#define TPM_DIGEST_SIZE 20	/* Max TPM v1.2 PCR size */
+#define TPM_DIGEST_SIZE 32	/* Max TPM v1.2 PCR size */
 
 /*
  * Chip num is this value or a valid tpm idx
@@ -33,7 +33,12 @@ struct tpm_chip;
 struct trusted_key_payload;
 struct trusted_key_options;
 
+enum TPM_OPS_FLAGS {
+	TPM_OPS_AUTO_STARTUP = BIT(0),
+};
+
 struct tpm_class_ops {
+	unsigned int flags;
 	const u8 req_complete_mask;
 	const u8 req_complete_val;
 	bool (*req_canceled)(struct tpm_chip *chip, u8 status);

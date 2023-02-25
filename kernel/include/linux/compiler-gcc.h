@@ -65,25 +65,40 @@
 #endif
 
 /*
+ * Feature detection for gnu_inline (gnu89 extern inline semantics). Either
+ * __GNUC_STDC_INLINE__ is defined (not using gnu89 extern inline semantics,
+ * and we opt in to the gnu89 semantics), or __GNUC_STDC_INLINE__ is not
+ * defined so the gnu89 semantics are the default.
+ */
+#ifdef __GNUC_STDC_INLINE__
+# define __gnu_inline	__attribute__((gnu_inline))
+#else
+# define __gnu_inline
+#endif
+
+/*
  * Force always-inline if the user requests it so via the .config,
  * or if gcc is too old.
  * GCC does not warn about unused static inline functions for
  * -Wunused-function.  This turns out to avoid the need for complex #ifdef
  * directives.  Suppress the warning in clang as well by using "unused"
  * function attribute, which is redundant but not harmful for gcc.
+ * Prefer gnu_inline, so that extern inline functions do not emit an
+ * externally visible function. This makes extern inline behave as per gnu89
+ * semantics rather than c99. This prevents multiple symbol definition errors
+ * of extern inline functions at link time.
+ * A lot of inline functions can cause havoc with function tracing.
  */
 #if !defined(CONFIG_ARCH_SUPPORTS_OPTIMIZED_INLINING) ||		\
     !defined(CONFIG_OPTIMIZE_INLINING) || (__GNUC__ < 4)
-#define inline inline		__attribute__((always_inline,unused)) notrace
-#define __inline__ __inline__	__attribute__((always_inline,unused)) notrace
-#define __inline __inline	__attribute__((always_inline,unused)) notrace
+#define inline \
+	inline __attribute__((always_inline, unused)) notrace __gnu_inline
 #else
-/* A lot of inline functions can cause havoc with function tracing */
-#define inline inline		__attribute__((unused)) notrace
-#define __inline__ __inline__	__attribute__((unused)) notrace
-#define __inline __inline	__attribute__((unused)) notrace
+#define inline inline		__attribute__((unused)) notrace __gnu_inline
 #endif
 
+#define __inline__ inline
+#define __inline inline
 #define __always_inline	inline __attribute__((always_inline))
 #define  noinline	__attribute__((noinline))
 
@@ -146,6 +161,7 @@
 
 #if GCC_VERSION >= 30400
 #define __must_check		__attribute__((warn_unused_result))
+#define __malloc		__attribute__((__malloc__))
 #endif
 
 #if GCC_VERSION >= 40000
@@ -161,7 +177,7 @@
 #define __compiler_offsetof(a, b)					\
 	__builtin_offsetof(a, b)
 
-#if GCC_VERSION >= 40100 && GCC_VERSION < 40600
+#if GCC_VERSION >= 40100
 # define __compiletime_object_size(obj) __builtin_object_size(obj, 0)
 #endif
 
@@ -190,7 +206,29 @@
 #endif /* __CHECKER__ */
 #endif /* GCC_VERSION >= 40300 */
 
+#if GCC_VERSION >= 40400
+#define __optimize(level)	__attribute__((__optimize__(level)))
+#endif /* GCC_VERSION >= 40400 */
+
 #if GCC_VERSION >= 40500
+
+#ifndef __CHECKER__
+#ifdef LATENT_ENTROPY_PLUGIN
+#define __latent_entropy __attribute__((latent_entropy))
+#endif
+#endif
+
+#ifdef CONFIG_STACK_VALIDATION
+#define annotate_unreachable() ({					\
+	asm("1:\t\n"							\
+	    ".pushsection __unreachable, \"a\"\t\n"			\
+	    ".long 1b\t\n"						\
+	    ".popsection\t\n");						\
+})
+#else
+#define annotate_unreachable()
+#endif
+
 /*
  * Mark a position in code as unreachable.  This can be used to
  * suppress control flow warnings after asm blocks that transfer
@@ -200,11 +238,16 @@
  * this in the preprocessor, but we can live with this because they're
  * unreleased.  Really, we need to have autoconf for the kernel.
  */
-#define unreachable() __builtin_unreachable()
+#define unreachable() \
+	do { annotate_unreachable(); __builtin_unreachable(); } while (0)
 
 /* Mark a function definition as prohibited from being cloned. */
 #define __noclone	__attribute__((__noclone__, __optimize__("no-tracer")))
 
+#if defined(RANDSTRUCT_PLUGIN) && !defined(__CHECKER__)
+#define __randomize_layout __attribute__((randomize_layout))
+#define __no_randomize_layout __attribute__((no_randomize_layout))
+#endif
 #endif /* GCC_VERSION >= 40500 */
 
 #if GCC_VERSION >= 40600
@@ -215,7 +258,16 @@
  * this.
  */
 #define __visible	__attribute__((externally_visible))
-#endif
+/*
+ * RANDSTRUCT_PLUGIN wants to use an anonymous struct, but it is only
+ * possible since GCC 4.6. To provide as much build testing coverage
+ * as possible, this is used for all GCC 4.6+ builds, and not just on
+ * RANDSTRUCT_PLUGIN builds.
+ */
+#define randomized_struct_fields_start	struct {
+#define randomized_struct_fields_end	} __randomize_layout;
+
+#endif /* GCC_VERSION >= 40600 */
 
 
 #if GCC_VERSION >= 40900 && !defined(__CHECKER__)
@@ -245,15 +297,19 @@
  */
 #define asm_volatile_goto(x...)	do { asm goto(x); asm (""); } while (0)
 
-#ifdef CONFIG_ARCH_USE_BUILTIN_BSWAP
+/*
+ * sparse (__CHECKER__) pretends to be gcc, but can't do constant
+ * folding in __builtin_bswap*() (yet), so don't set these for it.
+ */
+#if defined(CONFIG_ARCH_USE_BUILTIN_BSWAP) && !defined(__CHECKER__)
 #if GCC_VERSION >= 40400
 #define __HAVE_BUILTIN_BSWAP32__
 #define __HAVE_BUILTIN_BSWAP64__
 #endif
-#if GCC_VERSION >= 40800 || (defined(__powerpc__) && GCC_VERSION >= 40600)
+#if GCC_VERSION >= 40800
 #define __HAVE_BUILTIN_BSWAP16__
 #endif
-#endif /* CONFIG_ARCH_USE_BUILTIN_BSWAP */
+#endif /* CONFIG_ARCH_USE_BUILTIN_BSWAP && !__CHECKER__ */
 
 #if GCC_VERSION >= 70000
 #define KASAN_ABI_VERSION 5

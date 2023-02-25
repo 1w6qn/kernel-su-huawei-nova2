@@ -24,7 +24,6 @@
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
-#include <linux/hisi/hilog.h>
 
 static struct snd_soc_dai_link hi6250_hi6402_dai_link[] = {
     {
@@ -71,20 +70,6 @@ static struct snd_soc_dai_link hi6250_hi6402_dai_link[] = {
     },
     {
         /* dai link name*/
-        .name       = "hi3650_fm2",
-        /* stream name same as name */
-        .stream_name    = "hi3650_fm2",
-        /* codec(hi6401) device name ,see in hi6401.c */
-        .codec_name = "hi6402-codec",
-        /* cpu(k3v3:asp) dai name(device name)*/
-        .cpu_dai_name   = "slimbus-dai",
-        /* codec dai name, see in struct snd_soc_dai_driver in hi6402.c */
-        .codec_dai_name = "hi6402-fm-dai",
-        /* platform(k3v3:asp) device name */
-        .platform_name  = "snd-soc-dummy",
-    },
-    {
-        /* dai link name*/
         .name       = "hi3650_hi6402_pb_dsp",
         /* stream name same as name */
         .stream_name    = "hi3650_hi6402_pb_dsp",
@@ -119,7 +104,6 @@ static int hi6250_hi6402_probe(struct platform_device *pdev)
     ret = snd_soc_register_card(card);
     if (ret) {
         pr_err("%s : register failed %d\n", __FUNCTION__, ret);
-        HiLOGE("audio", "hi6250_hi6402", "%s : register failed %d\n", __FUNCTION__, ret);
 
 /* change by qianli temporary avoidance */
         ret = -ENODEV;

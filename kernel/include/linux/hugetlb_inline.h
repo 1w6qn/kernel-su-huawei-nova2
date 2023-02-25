@@ -5,16 +5,20 @@
 
 #include <linux/mm.h>
 
-static inline int is_vm_hugetlb_page(struct vm_area_struct *vma)
+static inline bool is_vm_hugetlb_page(struct vm_area_struct *vma)
 {
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	return !!(READ_ONCE(vma->vm_flags) & VM_HUGETLB);
+#else
 	return !!(vma->vm_flags & VM_HUGETLB);
+#endif
 }
 
 #else
 
-static inline int is_vm_hugetlb_page(struct vm_area_struct *vma)
+static inline bool is_vm_hugetlb_page(struct vm_area_struct *vma)
 {
-	return 0;
+	return false;
 }
 
 #endif

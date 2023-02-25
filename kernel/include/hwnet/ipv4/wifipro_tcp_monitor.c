@@ -17,6 +17,13 @@
 #include <linux/kthread.h>
 #include <linux/string.h>
 #include <net/tcp.h>
+#include <linux/version.h>
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0))
+#include <linux/sched.h>
+#include <linux/sched/mm.h>
+#endif
+
 #include "wifipro_tcp_monitor.h"
 
 #ifndef CONFIG_HW_WIFIPRO
@@ -42,7 +49,19 @@ DEFINE_MUTEX(wifipro_congestion_sem);
 #define LINK_MAYBE_POOR				2
 #define LINK_MAYBE_GOOD				3
 #define LINK_GOOD					4
-
+static char *s_arrTitle[MAX_ARR_TITLE_COUNT] = {
+	"WEBSENDSEGS",
+	"WEBRESENDSEGS",
+	"WEBRECVSEGS",
+	"WEBRTTDURATION",
+	"WEBRTTSEGS"
+};
+static int s_wlanTcpStat_index;
+static int s_rmnetTcpStat_index;
+static int s_hidataTcpStat_index;
+static UIDTCPStat s_uidWlanTcpStat[MAX_UID_CNT];   /* for wlan TCP uid Stat */
+static UIDTCPStat s_uidRmnetTcpStat[MAX_UID_CNT];  /* for rmnet TCP uid Stat */
+static HIDATAUIDTCPStat s_uidHidataTcpStat[MAX_UID_CNT];   /* for wlan TCP uid Stat */
 enum wifipro_KnlMsgType {
 	NETLINK_WIFIPRO_START_MONITOR = 0,
 	NETLINK_WIFIPRO_GET_MSG,
@@ -51,7 +70,8 @@ enum wifipro_KnlMsgType {
 	NETLINK_WIFIPRO_CONTINUE_MONITOR,
 	NETLINK_WIFIPRO_NOTIFY_MCC,
 	NETLINK_WIFIPRO_RESET_RTT,
-	NETLINK_WIFIPRO_GET_RTT
+	NETLINK_WIFIPRO_GET_RTT,
+    NETLINK_HIDATA_GET_TCP_INFO,
 };
 
 enum wifipro_msg_from {
@@ -118,6 +138,8 @@ static wifipro_rtt_second_stat_t *wlan_rtt_second_stat_head;
 static wifipro_rtt_second_stat_t *mobile_rtt_second_stat_head;
 static wifipro_cong_sock_t *wifipro_congestion_stat;
 
+static void updateHidataTcpStatByUID(kuid_t uid, int index, int count);
+static int hidata_tcp_info_report(int pid, kuid_t uid);
 static  kuid_t get_socket_uid(struct sock *sk)
 {
 	kuid_t uid = INVALID_UID;
@@ -298,6 +320,7 @@ void wifipro_update_tcp_statistics(int mib_type, const struct sk_buff *skb, stru
 		if ((skb->dev) && wifi_is_validate_state(sk)) {
 			if ((!strncmp(sk->wifipro_dev_name, "wlan",  4)) || (!strncmp(skb->dev->name, "wlan",  4))) {
 				updateWlanTcpStatByUID(get_socket_uid(sk), INDEX_WEBSENDSEGS, 1);
+                updateHidataTcpStatByUID(get_socket_uid(sk), INDEX_WEBSENDSEGS, 1);
 			} else if ((!strncmp(sk->wifipro_dev_name, "rmnet", 5)) || (!strncmp(skb->dev->name, "rmnet", 5))) {
 				updateRmnetTcpStatByUID(get_socket_uid(sk), INDEX_WEBSENDSEGS, 1);
 			} else {
@@ -333,6 +356,7 @@ void wifipro_update_tcp_statistics(int mib_type, const struct sk_buff *skb, stru
 		if (wifi_is_validate_state(sk)) {
 			if (!strncmp(sk->wifipro_dev_name, "wlan",  4)) {
 				updateWlanTcpStatByUID(get_socket_uid(sk), INDEX_WEBRECVSEGS, 1);
+                updateHidataTcpStatByUID(get_socket_uid(sk), INDEX_WEBRECVSEGS, 1);
 			} else if (!strncmp(sk->wifipro_dev_name, "rmnet", 5)) {
 				updateRmnetTcpStatByUID(get_socket_uid(sk), INDEX_WEBRECVSEGS, 1);
 			} else {
@@ -448,7 +472,6 @@ static void wifipro_set_cong_stat(unsigned int dest_addr, unsigned int dest_port
 int wifipro_handle_retrans(struct sock *sk, struct inet_connection_sock *icsk)
 {
 	struct inet_sock *inet = inet_sk(sk);
-	struct net *temp_net = NULL;
 	unsigned int dest_addr = 0;
 	unsigned int dest_port = 0;
 	unsigned int src_addr = 0;
@@ -476,6 +499,7 @@ int wifipro_handle_retrans(struct sock *sk, struct inet_connection_sock *icsk)
 	if (!strncmp(sk->wifipro_dev_name, "wlan",  4)) {
 		WIFIPRO_TCP_INC_STATS_BH(sock_net(sk), WIFIPRO_TCP_MIB_WLAN_RETRANSSEGS);
 		updateWlanTcpStatByUID(get_socket_uid(sk), INDEX_WEBRESENDSEGS, 1);
+        updateHidataTcpStatByUID(get_socket_uid(sk), INDEX_WEBRESENDSEGS, 1);
 	} else if (!strncmp(sk->wifipro_dev_name, "rmnet", 5)) {
 		WIFIPRO_TCP_INC_STATS_BH(sock_net(sk), WIFIPRO_TCP_MIB_MOBILE_RETRANSSEGS);
 		updateRmnetTcpStatByUID(get_socket_uid(sk), INDEX_WEBRESENDSEGS, 1);
@@ -551,28 +575,10 @@ static int wifipro_tcp_monitor_send_msg(int pid, unsigned int msg_from, unsigned
 	packet->tcp_retrans_pkts = snmp_fold_field((void __percpu **)init_net.mib.wifipro_tcp_statistics, WIFIPRO_TCP_MIB_WLAN_RETRANSSEGS);
 	packet->tcp_quality = quality;
 
-	if (pid != 0) {
-		ret = netlink_unicast(g_wifipro_nlfd, skb, pid, MSG_DONTWAIT); /*skb will be freed in netlink_unicast*/
-	} else {
-		kfree_skb(skb);
-		skb = NULL;
-		ret = -1;
-		goto end;
-	}
+	ret = netlink_unicast(g_wifipro_nlfd, skb, pid, MSG_DONTWAIT); /*skb will be freed in netlink_unicast*/
 
 end:
 	mutex_unlock(&wifipro_nl_send_sem);
-	/*if (wifipro_log_level >= WIFIPRO_DEBUG && ret != -1) {
-		char printk_buf[WIFIPRO_PRINT_BUF_SIZE];
-		int buf_len = 0;
-
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf), "\n\n@@@@@@@@@@@@@@@@@@@@@@@@@ Netlink struct @@@@@@@@@@@@@@@@@@@@@@@@@\n");
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "%s:send a msg to wifipro pid=%d:\n", __func__, pid);
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "rtt=%d  packet=%d  when=%ds  ", packet->rtt, packet->rtt_pkts, packet->rtt_when);
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "congestion=0x%x  quality=%d", packet->congestion, packet->tcp_quality);
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\n");
-		pr_err("%s", printk_buf);
-	}*/
 	return ret;
 }
 
@@ -643,27 +649,10 @@ static int wifipro_notify_rtt_msg(int pid, unsigned int msg_from)
 			break;
 	}
 
-	if (pid != 0) {
-		ret = netlink_unicast(g_wifipro_nlfd, skb, pid, MSG_DONTWAIT); /*skb will be freed in netlink_unicast*/
-	} else{
-		kfree_skb(skb);
-		skb = NULL;
-		ret = -1;
-		goto end;
-	}
+	ret = netlink_unicast(g_wifipro_nlfd, skb, pid, MSG_DONTWAIT); /*skb will be freed in netlink_unicast*/
 
 end:
 	mutex_unlock(&wifipro_nl_send_sem);
-	/*if (wifipro_log_level >= WIFIPRO_DEBUG && ret != -1) {
-		char printk_buf[WIFIPRO_PRINT_BUF_SIZE];
-		int buf_len = 0;
-
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf), "\n\n@@@@@@@@@@@@@@@@@@@@@@@@@ Netlink struct @@@@@@@@@@@@@@@@@@@@@@@@@\n");
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "%s:send a msg to wifipro pid=%d:\n", __func__, pid);
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "rtt=%d  packet=%d  when=%ds  ", packet->rtt, packet->rtt_pkts, packet->rtt_when);
-		buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\n");
-		pr_err("%s", printk_buf);
-	}*/
 	return ret;
 }
 
@@ -672,6 +661,7 @@ static void wifipro_tcp_monitor_nl_receive(struct sk_buff *__skb)
 {
 	struct nlmsghdr *nlh;
 	struct sk_buff *skb;
+    kuid_t uid;
 	if (NULL == __skb) {
 		pr_err("Invalid parameter: zero pointer reference(__skb)\n");
 		return;
@@ -751,7 +741,10 @@ static void wifipro_tcp_monitor_nl_receive(struct sk_buff *__skb)
 					wifipro_notify_rtt_msg(nlh->nlmsg_pid, WIFIPRO_NOTIFY_WLAN_SAMPLE_RTT);
 				}
 				break;
-
+            case NETLINK_HIDATA_GET_TCP_INFO:
+                uid = KUIDT_INIT(nlh->nlmsg_flags);
+                hidata_tcp_info_report(nlh->nlmsg_pid,uid);
+                break;
 			default:
 				WIFIPRO_WARNING("unvalid msg type, nlmsg_type = %d", nlh->nlmsg_type);
 				break;
@@ -788,46 +781,16 @@ void wifipro_handle_congestion(struct sock *sk, u8 ca_state)
 
 	case TCP_CA_Disorder:
 		dst = wifipro_congestion_stat + TCP_CA_Disorder;
-		/*if (wifipro_log_level >= WIFIPRO_DEBUG) {
-			char printk_buf[WIFIPRO_PRINT_BUF_SIZE];
-			int buf_len = 0;
-
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf), "\n************************** TCP_CA_Disorder **************************\n");
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "%s: %d  sk_state=%d  amount=%d, %lums ago",
-				__func__, dest_port, sk->sk_state, dst->amount+1, (jiffies - dst->when)*WIFIPRO_TICK_TO_MS);
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "\n*********************************************************************\n");
-			pr_err("%s", printk_buf);
-		}*/
 		wifipro_set_cong_stat(dest_addr, dest_port, wifipro_congestion_stat, TCP_CA_Disorder);
 		break;
 
 	case TCP_CA_CWR:
 		dst = wifipro_congestion_stat + TCP_CA_CWR;
-		/*if (wifipro_log_level >= WIFIPRO_DEBUG) {
-			char printk_buf[WIFIPRO_PRINT_BUF_SIZE];
-			int buf_len = 0;
-
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf), "\n************************** TCP_CA_CWR **************************\n");
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "%s: %d  sk_state=%d  amount=%d, %lums ago",
-				__func__, dest_port, sk->sk_state, dst->amount+1, (jiffies - dst->when)*WIFIPRO_TICK_TO_MS);
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "\n*********************************************************************\n");
-			pr_err("%s", printk_buf);
-		}*/
 		wifipro_set_cong_stat(dest_addr, dest_port, wifipro_congestion_stat, TCP_CA_CWR);
 		break;
 
 	case TCP_CA_Recovery:
 		dst = wifipro_congestion_stat + TCP_CA_Recovery;
-		/*if (wifipro_log_level >= WIFIPRO_DEBUG) {
-			char printk_buf[WIFIPRO_PRINT_BUF_SIZE];
-			int buf_len = 0;
-
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf), "\n************************** TCP_CA_Recovery **************************\n");
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "%s: %d  sk_state=%d  amount=%d, %lums ago",
-				__func__, dest_port, sk->sk_state, dst->amount+1, (jiffies - dst->when)*WIFIPRO_TICK_TO_MS);
-			buf_len += snprintf(printk_buf + buf_len,  sizeof(printk_buf) - buf_len,  "\n*********************************************************************\n");
-			pr_err("%s", printk_buf);
-		}*/
 		wifipro_set_cong_stat(dest_addr, dest_port, wifipro_congestion_stat, TCP_CA_Recovery);
 		break;
 
@@ -1025,6 +988,8 @@ void wifipro_update_rtt(unsigned int rtt, struct sock *sk)
 		wifipro_update_wlan_rtt(rtt, sk, dest_addr);
 		updateWlanTcpStatByUID(get_socket_uid(sk), INDEX_WEBRTTDURATION, rtt);
 		updateWlanTcpStatByUID(get_socket_uid(sk), INDEX_WEBRTTSEGS, 1);
+        updateHidataTcpStatByUID(get_socket_uid(sk), INDEX_WEBRTTDURATION, rtt);
+        updateHidataTcpStatByUID(get_socket_uid(sk), INDEX_WEBRTTSEGS, 1);
 	} else if (!strncmp(sk->wifipro_dev_name, "rmnet", 5)) {
 		wifipro_update_mobile_rtt(rtt, sk, dest_addr);
 		updateRmnetTcpStatByUID(get_socket_uid(sk), INDEX_WEBRTTDURATION, rtt);
@@ -1039,7 +1004,8 @@ static void wifipro_cong_stat_init(wifipro_cong_sock_t *src, unsigned char offse
 {
 	wifipro_cong_sock_t *dst = src + offset;
 
-	strncpy(dst->state_name, name, WIFIPRO_MAX_CA_NAME);
+	strncpy(dst->state_name, name, WIFIPRO_MAX_CA_NAME - 1);
+	dst->state_name[WIFIPRO_MAX_CA_NAME - 1] = '\0';
 }
 
 
@@ -1096,6 +1062,9 @@ static void wifipro_rtt_monitor_deinit(void)
 
 static int __init wifipro_tcp_monitor_module_init(void)
 {
+	struct netlink_kernel_cfg wifipro_tcp_monitor_nl_cfg = {
+		  .input = wifipro_tcp_monitor_nl_receive,
+	};
 	is_wifipro_running = true;
 	is_wifipro_on = false;
 	is_mcc_china = true;
@@ -1117,9 +1086,6 @@ static int __init wifipro_tcp_monitor_module_init(void)
 	mobile_rtt_second_stat_head = NULL;
 	wifipro_congestion_stat = NULL;
 
-	struct netlink_kernel_cfg wifipro_tcp_monitor_nl_cfg = {
-		  .input = wifipro_tcp_monitor_nl_receive,
-	};
 	g_wifipro_nlfd = netlink_kernel_create(&init_net,
 		NETLINK_WIFIPRO_EVENT_NL,
 		&wifipro_tcp_monitor_nl_cfg);
@@ -1185,7 +1151,7 @@ static ssize_t wifipro_log_level_write(struct file *file, const char __user *buf
 {
 
 	unsigned char log_level = 0;
-	WIFIPRO_ERROR("wifipro_log_level_write count = %d",count);
+	WIFIPRO_ERROR("wifipro_log_level_write count = %zu",count);
 	if (count != 2){
 
 		WIFIPRO_ERROR("unvalid count");
@@ -1263,7 +1229,7 @@ static int wifipro_snmp_seq_show(struct seq_file *seq, void *v)
 						   wifipro_snmp_tcp_list[i].entry));
 	}
 
-	if (s_uidWlanTcpStat != NULL) {
+	{
 		index = s_wlanTcpStat_index;
 		seq_printf(seq, "\nwlan UID state:\n");
 		seq_puts(seq, "UID\t");
@@ -1282,7 +1248,7 @@ static int wifipro_snmp_seq_show(struct seq_file *seq, void *v)
 		memset(s_uidWlanTcpStat, 0, sizeof(s_uidWlanTcpStat));
 		s_wlanTcpStat_index = 0;
 	}
-	if (s_uidRmnetTcpStat != NULL) {
+	{
 		index = s_rmnetTcpStat_index;
 		seq_printf(seq, "\nmobile UID state:\n");
 		seq_puts(seq, "UID\t");
@@ -1357,6 +1323,127 @@ int wifipro_get_srtt(void)
 static int wifipro_snmp_seq_open(struct inode *inode, struct file *file)
 {
 	return single_open_net(inode, file, wifipro_snmp_seq_show);
+}
+
+long get_current_time(void){
+    struct timex txc;
+    do_gettimeofday(&(txc.time));
+    return txc.time.tv_sec;
+}
+
+static int wifi_getHidataTcpStatIndex(kuid_t uid)
+{
+	int index =  INVALID_INDEX;
+	int i = 0;
+	if (!uid_valid(uid))
+		return INVALID_INDEX;
+
+	if (uid_eq(uid, KUIDT_INIT(0)) || uid_eq(uid, KUIDT_INIT(1000)))
+		return INVALID_INDEX;
+
+    for (i = 0; i < s_hidataTcpStat_index && i < MAX_UID_CNT ; i++) {
+		if (uid_eq(uid, s_uidHidataTcpStat[i].uid)) {
+			index = i;
+			goto out;
+		}
+	}
+
+	if (s_hidataTcpStat_index < MAX_UID_CNT) {
+		index = s_hidataTcpStat_index;
+		s_hidataTcpStat_index++;
+		s_uidHidataTcpStat[index].uid = uid;
+	}
+out:
+	return index;
+}
+
+static void updateHidataTcpStatByUID(kuid_t uid, int index, int count)
+{
+	int result = 0;
+    int temp = 0;
+    long s_time = 0;
+    int i;
+    if (!uid_valid(uid))
+		return;
+
+	if (uid_eq(uid, KUIDT_INIT(0)) || uid_eq(uid, KUIDT_INIT(1000)))
+		return;
+
+	result = wifi_getHidataTcpStatIndex(uid);
+
+	if (result == INVALID_INDEX){
+        s_time = s_uidHidataTcpStat[0].last_time;
+        temp = 0;
+        for(i = 1; i < MAX_UID_CNT; i++){
+            if(s_uidHidataTcpStat[i].last_time < s_time){
+                s_time = s_uidHidataTcpStat[i].last_time;
+                temp = i;
+            }
+        }
+        memset(&s_uidHidataTcpStat[temp],0,sizeof(HIDATAUIDTCPStat));
+        s_uidHidataTcpStat[temp].uid = uid;
+        result = temp;
+    }
+
+	if (!uid_eq(uid, s_uidHidataTcpStat[result].uid))
+		return;
+
+	s_uidHidataTcpStat[result].counter[index] += count;
+    s_uidHidataTcpStat[result].last_time = get_current_time();
+}
+
+
+static int hidata_tcp_info_report(int pid, kuid_t uid)
+{
+	int ret;
+	int size;
+    int result = 0;
+	struct sk_buff *skb = NULL;
+	struct nlmsghdr *nlh = NULL;
+	struct wifipro_nl_packet_msg *packet = NULL;
+
+	if (!pid || !g_wifipro_nlfd) {
+		WIFIPRO_ERROR("cannot notify event, pid = %d", pid);
+		return -1;
+	}
+    
+    result = wifi_getHidataTcpStatIndex(uid);
+    if(result == INVALID_INDEX){
+        WIFIPRO_ERROR("hidata_tcp_info_report error");
+		return -1;
+    }
+
+	mutex_lock(&wifipro_nl_send_sem);
+	size = sizeof(struct wifipro_nl_packet_msg);
+	skb = nlmsg_new(size, GFP_ATOMIC);
+	if (!skb) {
+		WIFIPRO_ERROR("alloc skb fail");
+		ret = -1;
+		goto end;
+	}
+
+	nlh = nlmsg_put(skb, 0, 0, NETLINK_WIFIPRO_GET_MSG, size, 0);
+	if (!nlh) {
+		kfree_skb(skb);
+		skb = NULL;
+		ret = -1;
+		goto end;
+	}
+
+	packet = nlmsg_data(nlh);
+	memset(packet, 0, sizeof(struct wifipro_nl_packet_msg));
+
+	packet->rtt = s_uidHidataTcpStat[result].counter[INDEX_WEBRTTDURATION];
+	packet->rtt_pkts = s_uidHidataTcpStat[result].counter[INDEX_WEBRTTSEGS];
+	packet->tcp_rx_pkts = s_uidHidataTcpStat[result].counter[INDEX_WEBRECVSEGS];
+	packet->tcp_tx_pkts = s_uidHidataTcpStat[result].counter[INDEX_WEBSENDSEGS];
+	packet->tcp_retrans_pkts = s_uidHidataTcpStat[result].counter[INDEX_WEBRESENDSEGS];
+    
+	ret = netlink_unicast(g_wifipro_nlfd, skb, pid, MSG_DONTWAIT);
+
+end:
+	mutex_unlock(&wifipro_nl_send_sem);
+	return ret;
 }
 
 static const struct file_operations wifipro_snmp_seq_fops = {

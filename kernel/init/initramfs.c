@@ -19,6 +19,7 @@
 #include <linux/syscalls.h>
 #include <linux/utime.h>
 #include <linux/initramfs.h>
+#include <linux/file.h>
 
 static ssize_t __init xwrite(int fd, const char *p, size_t count)
 {
@@ -447,7 +448,7 @@ static unsigned long my_inptr; /* index of next byte to be processed in inbuf */
 
 #include <linux/decompress/generic.h>
 
-static char * __init unpack_to_rootfs(char *buf, unsigned long len)
+char * __init unpack_to_rootfs(char *buf, unsigned long len)
 {
 	long written;
 	decompress_fn decompress;
@@ -559,7 +560,7 @@ skip:
 
 #ifdef CONFIG_BLK_DEV_RAM
 #define BUF_SIZE 1024
-static void __init clean_rootfs(void)
+void __init clean_rootfs(void)
 {
 	int fd;
 	void *buf;
@@ -621,8 +622,11 @@ static int __init populate_rootfs(void)
 {
 	char *err;
 
-	if (do_skip_initramfs)
+	if (do_skip_initramfs) {
+		if (initrd_start)
+			free_initrd();
 		return default_rootfs();
+	}
 
 	err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
 	if (err)
@@ -664,6 +668,7 @@ static int __init populate_rootfs(void)
 			printk(KERN_EMERG "Initramfs unpacking failed: %s\n", err);
 		free_initrd();
 #endif
+		flush_delayed_fput();
 		/*
 		 * Try loading default modules from initramfs.  This gives
 		 * us a chance to load before device_initcalls.

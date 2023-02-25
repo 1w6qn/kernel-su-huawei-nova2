@@ -28,7 +28,9 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <net/udp.h>
-#include <huawei_platform/power/bastet/bastet.h>
+#ifdef CONFIG_HUAWEI_BASTET
+#include <huawei_platform/net/bastet/bastet.h>
+#endif
 #if defined(CONFIG_IP6_NF_IPTABLES) || defined(CONFIG_IP6_NF_IPTABLES_MODULE)
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #endif
@@ -53,7 +55,6 @@ extern void wifipro_update_tcp_statistics(int mib_type, const struct sk_buff *sk
  */
 #define XT_SOCKET_SUPPORTED_HOOKS \
 	((1 << NF_INET_PRE_ROUTING) | (1 << NF_INET_LOCAL_IN))
-
 
 static const char *module_procdirname = "xt_qtaguid";
 static struct proc_dir_entry *xt_qtaguid_procdir;
@@ -984,9 +985,8 @@ static void iface_stat_create(struct net_device *net_dev,
 		for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
 			IF_DEBUG("qtaguid: iface_stat: create(%s): "
 				 "ifa=%p ifa_label=%s\n",
-				 ifname, ifa,
-				 ifa->ifa_label ? ifa->ifa_label : "(null)");
-			if (ifa->ifa_label && !strcmp(ifname, ifa->ifa_label))
+				 ifname, ifa, ifa->ifa_label);
+			if (!strcmp(ifname, ifa->ifa_label))
 				break;
 		}
 	}
@@ -1084,18 +1084,6 @@ static struct sock_tag *get_sock_stat_nl(const struct sock *sk)
 	return sock_tag_tree_search(&sock_tag_tree, sk);
 }
 
-static struct sock_tag *get_sock_stat(const struct sock *sk)
-{
-	struct sock_tag *sock_tag_entry;
-	MT_DEBUG("qtaguid: get_sock_stat(sk=%p)\n", sk);
-	if (!sk)
-		return NULL;
-	spin_lock_bh(&sock_tag_list_lock);
-	sock_tag_entry = get_sock_stat_nl(sk);
-	spin_unlock_bh(&sock_tag_list_lock);
-	return sock_tag_entry;
-}
-
 static int ipx_proto(const struct sk_buff *skb,
 		     struct xt_action_param *par)
 {
@@ -1190,6 +1178,33 @@ static void iface_stat_update(struct net_device *net_dev, bool stash_only)
 	spin_unlock_bh(&iface_stat_list_lock);
 }
 
+/* Guarantied to return a net_device that has a name */
+static void get_dev_and_dir(const struct sk_buff *skb,
+			    struct xt_action_param *par,
+			    enum ifs_tx_rx *direction,
+			    const struct net_device **el_dev)
+{
+	BUG_ON(!direction || !el_dev);
+
+	if (par->in) {
+		*el_dev = par->in;
+		*direction = IFS_RX;
+	} else if (par->out) {
+		*el_dev = par->out;
+		*direction = IFS_TX;
+	} else {
+		pr_err("qtaguid[%d]: %s(): no par->in/out?!!\n",
+		       par->hooknum, __func__);
+		BUG();
+	}
+	if (skb->dev && *el_dev != skb->dev) {
+		MT_DEBUG("qtaguid[%d]: skb->dev=%p %s vs par->%s=%p %s\n",
+			 par->hooknum, skb->dev, skb->dev->name,
+			 *direction == IFS_RX ? "in" : "out",  *el_dev,
+			 (*el_dev)->name);
+	}
+}
+
 /*
  * Update stats for the specified interface from the skb.
  * Do nothing if the entry
@@ -1201,55 +1216,33 @@ static void iface_stat_update_from_skb(const struct sk_buff *skb,
 {
 	struct iface_stat *entry;
 	const struct net_device *el_dev;
-	enum ifs_tx_rx direction = par->in ? IFS_RX : IFS_TX;
+	enum ifs_tx_rx direction;
 	int bytes = skb->len;
 	int proto;
 
-	if (!skb->dev) {
-		MT_DEBUG("qtaguid[%d]: no skb->dev\n", par->hooknum);
-		el_dev = par->in ? : par->out;
-	} else {
-		const struct net_device *other_dev;
-		el_dev = skb->dev;
-		other_dev = par->in ? : par->out;
-		if (el_dev != other_dev) {
-			MT_DEBUG("qtaguid[%d]: skb->dev=%p %s vs "
-				 "par->(in/out)=%p %s\n",
-				 par->hooknum, el_dev, el_dev->name, other_dev,
-				 other_dev->name);
-		}
-	}
+	get_dev_and_dir(skb, par, &direction, &el_dev);
+	proto = ipx_proto(skb, par);
+	MT_DEBUG("qtaguid[%d]: iface_stat: %s(%s): "
+		 "type=%d fam=%d proto=%d dir=%d\n",
+		 par->hooknum, __func__, el_dev->name, el_dev->type,
+		 par->family, proto, direction);
 
-	if (unlikely(!el_dev)) {
-		pr_err_ratelimited("qtaguid[%d]: %s(): no par->in/out?!!\n",
-				   par->hooknum, __func__);
-		BUG();
-	} else if (unlikely(!el_dev->name)) {
-		pr_err_ratelimited("qtaguid[%d]: %s(): no dev->name?!!\n",
-				   par->hooknum, __func__);
-		BUG();
-	} else {
-		proto = ipx_proto(skb, par);
-		MT_DEBUG("qtaguid[%d]: dev name=%s type=%d fam=%d proto=%d\n",
-			 par->hooknum, el_dev->name, el_dev->type,
-			 par->family, proto);
 #ifdef CONFIG_HW_WIFIPRO
-		if(direction == IFS_TX){
-		    wifipro_update_tcp_statistics(WIFIPRO_TCP_MIB_OUTSEGS, skb, NULL);
-		}
+        if(direction == IFS_TX){
+                wifipro_update_tcp_statistics(WIFIPRO_TCP_MIB_OUTSEGS, skb, NULL);
+        }
 #endif
-	}
 
 	spin_lock_bh(&iface_stat_list_lock);
 	entry = get_iface_entry(el_dev->name);
 	if (entry == NULL) {
-		IF_DEBUG("qtaguid: iface_stat: %s(%s): not tracked\n",
-			 __func__, el_dev->name);
+		IF_DEBUG("qtaguid[%d]: iface_stat: %s(%s): not tracked\n",
+			 par->hooknum, __func__, el_dev->name);
 		spin_unlock_bh(&iface_stat_list_lock);
 		return;
 	}
 
-	IF_DEBUG("qtaguid: %s(%s): entry=%p\n", __func__,
+	IF_DEBUG("qtaguid[%d]: %s(%s): entry=%p\n", par->hooknum,  __func__,
 		 el_dev->name, entry);
 
 	data_counters_update(&entry->totals_via_skb, 0, direction, proto,
@@ -1314,31 +1307,34 @@ static void if_tag_stat_update(const char *ifname, uid_t uid,
 	spin_lock_bh(&iface_stat_list_lock);
 	iface_entry = get_iface_entry(ifname);
 	if (!iface_entry) {
-		pr_err_ratelimited("qtaguid: iface_stat: stat_update() "
+		pr_err_ratelimited("qtaguid: tag_stat: stat_update() "
 				   "%s not found\n", ifname);
 		spin_unlock_bh(&iface_stat_list_lock);
 		return;
 	}
 	/* It is ok to process data when an iface_entry is inactive */
 
-	MT_DEBUG("qtaguid: iface_stat: stat_update() dev=%s entry=%p\n",
+	MT_DEBUG("qtaguid: tag_stat: stat_update() dev=%s entry=%p\n",
 		 ifname, iface_entry);
 
 	/*
 	 * Look for a tagged sock.
 	 * It will have an acct_uid.
 	 */
-	sock_tag_entry = get_sock_stat(sk);
+	spin_lock_bh(&sock_tag_list_lock);
+	sock_tag_entry = sk ? get_sock_stat_nl(sk) : NULL;
 	if (sock_tag_entry) {
 		tag = sock_tag_entry->tag;
 		acct_tag = get_atag_from_tag(tag);
 		uid_tag = get_utag_from_tag(tag);
-	} else {
+	}
+	spin_unlock_bh(&sock_tag_list_lock);
+	if (!sock_tag_entry) {
 		acct_tag = make_atag_from_value(0);
 		tag = combine_atag_with_uid(acct_tag, uid);
 		uid_tag = make_tag_from_uid(uid);
 	}
-	MT_DEBUG("qtaguid: iface_stat: stat_update(): "
+	MT_DEBUG("qtaguid: tag_stat: stat_update(): "
 		 " looking for tag=0x%llx (uid=%u) in ife=%p\n",
 		 tag, get_uid_from_tag(tag), iface_entry);
 	/* Loop over tag list under this interface for {acct_tag,uid_tag} */
@@ -1659,8 +1655,8 @@ static struct sock *qtaguid_find_sk(const struct sk_buff *skb,
 	struct sock *sk;
 	unsigned int hook_mask = (1 << par->hooknum);
 
-	MT_DEBUG("qtaguid: find_sk(skb=%p) hooknum=%d family=%d\n", skb,
-		 par->hooknum, par->family);
+	MT_DEBUG("qtaguid[%d]: find_sk(skb=%p) family=%d\n",
+		 par->hooknum, skb, par->family);
 
 	/*
 	 * Let's not abuse the the xt_socket_get*_sk(), or else it will
@@ -1681,16 +1677,8 @@ static struct sock *qtaguid_find_sk(const struct sk_buff *skb,
 	}
 
 	if (sk) {
-		MT_DEBUG("qtaguid: %p->sk_proto=%u "
-			 "->sk_state=%d\n", sk, sk->sk_protocol, sk->sk_state);
-		/*
-		 * When in TCP_TIME_WAIT the sk is not a "struct sock" but
-		 * "struct inet_timewait_sock" which is missing fields.
-		 */
-		if (!sk_fullsock(sk) || sk->sk_state  == TCP_TIME_WAIT) {
-			sock_gen_put(sk);
-			sk = NULL;
-		}
+		MT_DEBUG("qtaguid[%d]: %p->sk_proto=%u->sk_state=%d\n",
+			 par->hooknum, sk, sk->sk_protocol, sk->sk_state);
 	}
 	return sk;
 }
@@ -1700,47 +1688,30 @@ static void account_for_uid(const struct sk_buff *skb,
 			    struct xt_action_param *par)
 {
 	const struct net_device *el_dev;
+	enum ifs_tx_rx direction;
+	int proto;
 
-	if (!skb->dev) {
-		MT_DEBUG("qtaguid[%d]: no skb->dev\n", par->hooknum);
-		el_dev = par->in ? : par->out;
-	} else {
-		const struct net_device *other_dev;
-		el_dev = skb->dev;
-		other_dev = par->in ? : par->out;
-		if (el_dev != other_dev) {
-			MT_DEBUG("qtaguid[%d]: skb->dev=%p %s vs "
-				"par->(in/out)=%p %s\n",
-				par->hooknum, el_dev, el_dev->name, other_dev,
-				other_dev->name);
-		}
-	}
+	get_dev_and_dir(skb, par, &direction, &el_dev);
+	proto = ipx_proto(skb, par);
 
-	if (unlikely(!el_dev)) {
-		pr_info("qtaguid[%d]: no par->in/out?!!\n", par->hooknum);
-	} else if (unlikely(!el_dev->name)) {
-		pr_info("qtaguid[%d]: no dev->name?!!\n", par->hooknum);
-	} else {
-		int proto = ipx_proto(skb, par);
-		MT_DEBUG("qtaguid[%d]: dev name=%s type=%d fam=%d proto=%d\n",
-			 par->hooknum, el_dev->name, el_dev->type,
-			 par->family, proto);
+	MT_DEBUG("qtaguid[%d]: dev name=%s type=%d fam=%d proto=%d dir=%d\n",
+		 par->hooknum, el_dev->name, el_dev->type,
+		 par->family, proto, direction);
 
-		if_tag_stat_update(el_dev->name, uid,
-				skb->sk ? skb->sk : alternate_sk,
-				par->in ? IFS_RX : IFS_TX,
-				proto, skb->len);
+	if_tag_stat_update(el_dev->name, uid,
+			   skb->sk ? skb->sk : alternate_sk,
+			   direction,
+			   proto, skb->len);
 
 #ifdef CONFIG_HW_QTAGUID_PID
-		if_pid_stat_update(el_dev->name, uid,
-				skb->sk ? skb->sk : alternate_sk,
-				skb,
-				get_active_counter_set(make_tag_from_uid(uid)),
-				par->family,
-				par->in ? IFS_RX : IFS_TX,
-				proto, skb->len);
+	if_pid_stat_update(el_dev->name, uid,
+			skb->sk ? skb->sk : alternate_sk,
+			skb,
+			get_active_counter_set(make_tag_from_uid(uid)),
+			par->family,
+			direction,
+			proto, skb->len);
 #endif
-	}
 }
 
 static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
@@ -1752,6 +1723,11 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	kuid_t sock_uid;
 	bool res;
 	bool set_sk_callback_lock = false;
+	/*
+	 * TODO: unhack how to force just accounting.
+	 * For now we only do tag stats when the uid-owner is not requested
+	 */
+	bool do_tag_stat = !(info->match & XT_QTAGUID_UID);
 
 	if (unlikely(module_passive))
 		return (info->match ^ info->invert) == 0;
@@ -1795,10 +1771,25 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		 */
 		sk = qtaguid_find_sk(skb, par);
 		/*
-		 * If we got the socket from the find_sk(), we will need to put
-		 * it back, as nf_tproxy_get_sock_v4() got it.
+		 * TCP_NEW_SYN_RECV are not "struct sock" but "struct request_sock"
+		 * where we can get a pointer to a full socket to retrieve uid/gid.
+		 * When in TCP_TIME_WAIT, sk is a struct inet_timewait_sock
+		 * which is missing fields and does not contain any reference
+		 * to a full socket, so just ignore the socket.
 		 */
-		got_sock = sk;
+		if (sk && sk->sk_state == TCP_NEW_SYN_RECV) {
+			sock_gen_put(sk);
+			sk = sk_to_full_sk(sk);
+		} else if (sk && (!sk_fullsock(sk) || sk->sk_state == TCP_TIME_WAIT)) {
+			sock_gen_put(sk);
+			sk = NULL;
+		} else {
+			/*
+			 * If we got the socket from the find_sk(), we will need to put
+			 * it back, as nf_tproxy_get_sock_v4() got it.
+			 */
+			got_sock = sk;
+		}
 		if (sk)
 			atomic64_inc(&qtu_events.match_found_sk_in_ct);
 		else
@@ -1808,33 +1799,16 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	}
 	MT_DEBUG("qtaguid[%d]: sk=%p got_sock=%d fam=%d proto=%d\n",
 		 par->hooknum, sk, got_sock, par->family, ipx_proto(skb, par));
-	if (sk != NULL) {
-		set_sk_callback_lock = true;
-		read_lock_bh(&sk->sk_callback_lock);
-		MT_DEBUG("qtaguid[%d]: sk=%p->sk_socket=%p->file=%p\n",
-			par->hooknum, sk, sk->sk_socket,
-			sk->sk_socket ? sk->sk_socket->file : (void *)-1LL);
-		filp = sk->sk_socket ? sk->sk_socket->file : NULL;
-		MT_DEBUG("qtaguid[%d]: filp...uid=%u\n",
-			par->hooknum, filp ? from_kuid(&init_user_ns, filp->f_cred->fsuid) : -1);
-	}
 
-	if (sk == NULL || sk->sk_socket == NULL) {
+	if (!sk) {
 		/*
 		 * Here, the qtaguid_find_sk() using connection tracking
 		 * couldn't find the owner, so for now we just count them
 		 * against the system.
 		 */
-		/*
-		 * TODO: unhack how to force just accounting.
-		 * For now we only do iface stats when the uid-owner is not
-		 * requested.
-		 */
-		if (!(info->match & XT_QTAGUID_UID))
+		if (do_tag_stat)
 			account_for_uid(skb, sk, 0, par);
-		MT_DEBUG("qtaguid[%d]: leaving (sk?sk->sk_socket)=%p\n",
-			par->hooknum,
-			sk ? sk->sk_socket : NULL);
+		MT_DEBUG("qtaguid[%d]: leaving (sk=NULL)\n", par->hooknum);
 		res = (info->match ^ info->invert) == 0;
 		atomic64_inc(&qtu_events.match_no_sk);
 		goto put_sock_ret_res;
@@ -1842,23 +1816,10 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		res = false;
 		goto put_sock_ret_res;
 	}
-	filp = sk->sk_socket->file;
-	if (filp == NULL) {
-		MT_DEBUG("qtaguid[%d]: leaving filp=NULL\n", par->hooknum);
-		if (!(info->match & XT_QTAGUID_UID))
-			account_for_uid(skb, sk, 0, par);
-		res = ((info->match ^ info->invert) &
-			(XT_QTAGUID_UID | XT_QTAGUID_GID)) == 0;
-		atomic64_inc(&qtu_events.match_no_sk_file);
-		goto put_sock_ret_res;
-	}
-	sock_uid = filp->f_cred->fsuid;
-	/*
-	 * TODO: unhack how to force just accounting.
-	 * For now we only do iface stats when the uid-owner is not requested
-	 */
-	if (!(info->match & XT_QTAGUID_UID))
-		account_for_uid(skb, sk, from_kuid(&init_user_ns, sock_uid), par);
+	sock_uid = sk->sk_uid;
+	if (do_tag_stat)
+		account_for_uid(skb, sk, from_kuid(&init_user_ns, sock_uid),
+				par);
 
 	/*
 	 * The following two tests fail the match when:
@@ -1870,8 +1831,8 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		kuid_t uid_min = make_kuid(&init_user_ns, info->uid_min);
 		kuid_t uid_max = make_kuid(&init_user_ns, info->uid_max);
 
-		if ((uid_gte(filp->f_cred->fsuid, uid_min) &&
-		     uid_lte(filp->f_cred->fsuid, uid_max)) ^
+		if ((uid_gte(sock_uid, uid_min) &&
+		     uid_lte(sock_uid, uid_max)) ^
 		    !(info->invert & XT_QTAGUID_UID)) {
 			MT_DEBUG("qtaguid[%d]: leaving uid not matching\n",
 				 par->hooknum);
@@ -1882,7 +1843,21 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	if (info->match & XT_QTAGUID_GID) {
 		kgid_t gid_min = make_kgid(&init_user_ns, info->gid_min);
 		kgid_t gid_max = make_kgid(&init_user_ns, info->gid_max);
-
+		set_sk_callback_lock = true;
+		read_lock_bh(&sk->sk_callback_lock);
+		MT_DEBUG("qtaguid[%d]: sk=%p->sk_socket=%p->file=%p\n",
+			 par->hooknum, sk, sk->sk_socket,
+			 sk->sk_socket ? sk->sk_socket->file : (void *)-1LL);
+		filp = sk->sk_socket ? sk->sk_socket->file : NULL;
+		if (!filp) {
+			res = ((info->match ^ info->invert) &
+			       XT_QTAGUID_GID) == 0;
+			atomic64_inc(&qtu_events.match_no_sk_gid);
+			goto put_sock_ret_res;
+		}
+		MT_DEBUG("qtaguid[%d]: filp...uid=%u\n",
+			 par->hooknum, filp ?
+			 from_kuid(&init_user_ns, filp->f_cred->fsuid) : -1);
 		if ((gid_gte(filp->f_cred->fsgid, gid_min) &&
 				gid_lte(filp->f_cred->fsgid, gid_max)) ^
 			!(info->invert & XT_QTAGUID_GID)) {
@@ -1891,7 +1866,21 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 			res = false;
 			goto put_sock_ret_res;
 		}
+		//Thus (!a && b) || (a && !b) == a ^ b
+	} else if (info->match & XT_QTAGUID_PID) {
+		if ((sk->sk_socket == NULL)) {
+			res = false;
+			goto put_sock_ret_res;
+		}
+
+		if (((sk->sk_socket->pid >= info->xt_pid_min) && (sk->sk_socket->pid <= info->xt_pid_max)) ^ !(info->invert & XT_QTAGUID_PID)) {
+			MT_DEBUG("qtaguid-PID XT_QTAGUID_PID[%d]: leaving Pid not matching\n",
+				par->hooknum);
+			res = false;
+			goto put_sock_ret_res;
+		}
 	}
+
 	MT_DEBUG("qtaguid[%d]: leaving matched\n", par->hooknum);
 	res = true;
 
@@ -2054,7 +2043,7 @@ static int qtaguid_ctrl_proc_show(struct seq_file *m, void *v)
 			   "match_found_sk_in_ct=%llu "
 			   "match_found_no_sk_in_ct=%llu "
 			   "match_no_sk=%llu "
-			   "match_no_sk_file=%llu\n",
+			   "match_no_sk_gid=%llu\n",
 			   (u64)atomic64_read(&qtu_events.sockets_tagged),
 			   (u64)atomic64_read(&qtu_events.sockets_untagged),
 			   (u64)atomic64_read(&qtu_events.counter_set_changes),
@@ -2066,7 +2055,7 @@ static int qtaguid_ctrl_proc_show(struct seq_file *m, void *v)
 			   (u64)atomic64_read(&qtu_events.match_found_sk_in_ct),
 			   (u64)atomic64_read(&qtu_events.match_found_no_sk_in_ct),
 			   (u64)atomic64_read(&qtu_events.match_no_sk),
-			   (u64)atomic64_read(&qtu_events.match_no_sk_file));
+			   (u64)atomic64_read(&qtu_events.match_no_sk_gid));
 
 		/* Count the following as part of the last item_index. No need
 		 * to lock the sock_tag_list here since it is already locked when
@@ -2530,15 +2519,20 @@ int qtaguid_untag(struct socket *el_socket, bool kernel)
 	 * At first, we want to catch user-space code that is not
 	 * opening the /dev/xt_qtaguid.
 	 */
-	if (IS_ERR_OR_NULL(pqd_entry) || !sock_tag_entry->list.next) {
+	if (IS_ERR_OR_NULL(pqd_entry))
 		pr_warn_once("qtaguid: %s(): "
 			     "User space forgot to open /dev/xt_qtaguid? "
 			     "pid=%u tgid=%u sk_pid=%u, uid=%u\n", __func__,
 			     current->pid, current->tgid, sock_tag_entry->pid,
 			     from_kuid(&init_user_ns, current_fsuid()));
-	} else {
+	/*
+	 * This check is needed because tagging from a process that
+	 * didn’t open /dev/xt_qtaguid still adds the sock_tag_entry
+	 * to sock_tag_tree.
+	 */
+	if (sock_tag_entry->list.next)
 		list_del(&sock_tag_entry->list);
-	}
+
 	spin_unlock_bh(&uid_tag_data_tree_lock);
 	/*
 	 * We don't free tag_ref from the utd_entry here,

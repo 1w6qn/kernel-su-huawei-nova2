@@ -35,13 +35,7 @@ typedef enum  {
 	MAX_ARR_TITLE_COUNT
 } COUNTER_TYPE;
 
-static char *s_arrTitle[MAX_ARR_TITLE_COUNT] = {
-	"WEBSENDSEGS",
-	"WEBRESENDSEGS",
-	"WEBRECVSEGS",
-	"WEBRTTDURATION",
-	"WEBRTTSEGS"
-};
+
 
 #define MAX_UID_CNT   8
 #define INVALID_INDEX 0xFFFFFFFF
@@ -51,10 +45,12 @@ typedef struct {
 	unsigned int counter[MAX_ARR_TITLE_COUNT];
 } UIDTCPStat;
 
-static int s_wlanTcpStat_index;
-static int s_rmnetTcpStat_index;
-static UIDTCPStat s_uidWlanTcpStat[MAX_UID_CNT];   /* for wlan TCP uid Stat */
-static UIDTCPStat s_uidRmnetTcpStat[MAX_UID_CNT];  /* for rmnet TCP uid Stat */
+typedef struct {
+    kuid_t uid;
+    long last_time;
+    unsigned int counter[MAX_ARR_TITLE_COUNT];
+} HIDATAUIDTCPStat;
+
 
 
 enum {

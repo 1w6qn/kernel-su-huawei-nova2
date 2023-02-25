@@ -49,12 +49,14 @@ typedef enum _tag_hwcam_device_id_constants
     HWCAM_SUBDEV_DEPTHISP                               = 0x80e0,
     HWCAM_SUBDEV_HJPEG                                  = 0x80f0,
     HWCAM_SUBDEV_GAZELED                                = 0x8100,
+    HWCAM_SUBDEV_FPGA                                   = 0x8110,
+    HWCAM_SUBDEV_DRIVER_IC                              = 0x8120,
+    HWCAM_SUBDEV_DOT_PROJECTOR                          = 0x8130,
 } hwcam_device_id_constants_t;
 
 typedef enum _tag_hwcam_buf_kind
 {
     HWCAM_BUF_KIND_PIPELINE_CAPABILITY,
-    HWCAM_BUF_KIND_PIPELINE_PARAM,
     HWCAM_BUF_KIND_STREAM_PARAM,
     HWCAM_BUF_KIND_STREAM,
 } hwcam_buf_kind_t;
@@ -139,6 +141,48 @@ typedef struct _tag_hwcam_data_table
     hwcam_data_entry_t                                  unused_list;
     hwcam_data_entry_t                                  entries[0];
 } hwcam_data_table_t;
+
+/* cdphy-CSI2 info */
+typedef enum _phy_id_e
+{
+    CDPHY_A = 0,
+    CDPHY_B,
+    CDPHY_C,
+    CDPHY_D,
+    CDPHY_MAX,
+}phy_id_e;
+
+typedef enum _phy_mode_e
+{
+    PHY_MODE_DPHY = 0,
+    PHY_MODE_CPHY,
+    PHY_MODE_MAX,
+}phy_mode_e;
+
+typedef enum _phy_freq_mode_e
+{
+    PHY_AUTO_FREQ = 0,
+    PHY_MANUAL_FREQ,
+    PHY_FREQ_MODE_MAX,
+}phy_freq_mode_e;
+
+typedef enum _phy_work_mode_e
+{
+    PHY_SINGLE_MODE = 0,
+    PHY_DUAL_MODE_SENSORA,//dphy use DL1&3,cphy use DL2
+    PHY_DUAL_MODE_SENSORB,//dphy use DL0&2,cphy use DL0&1
+    PHY_WORK_MODE_MAX,
+}phy_work_mode_e;
+
+typedef struct _phy_info_t
+{
+    unsigned int is_master_sensor[2];
+    phy_id_e phy_id[2];
+    phy_mode_e phy_mode[2];
+    phy_freq_mode_e phy_freq_mode[2];
+    unsigned int phy_freq[2];
+    phy_work_mode_e phy_work_mode[2];
+} phy_info_t;
 
 typedef void (*pfn_data_table_entry_handler)
     (hwcam_data_entry_t* entry, void* data, uint32_t dim);
@@ -423,21 +467,6 @@ hwcam_data_table_set_as_used(hwcam_data_table_t* tbl,
     return hwcam_data_table_set_entry_as_used(tbl, tgt, used);
 }
 
-#define HWCAM_V4L2_IOCTL_MOUNT_BUF \
-    _IOW('A', BASE_VIDIOC_PRIVATE + 0x01, hwcam_buf_info_t)
-
-#define HWCAM_V4L2_IOCTL_UNMOUNT_BUF \
-    _IOW('A', BASE_VIDIOC_PRIVATE + 0x02, hwcam_buf_info_t)
-
-#define HWCAM_V4L2_IOCTL_MOUNT_GRAPHIC_BUF \
-    _IOW('A', BASE_VIDIOC_PRIVATE + 0x03, hwcam_graphic_buf_info_t)
-
-#define HWCAM_V4L2_IOCTL_UNMOUNT_GRAPHIC_BUF \
-    _IOW('A', BASE_VIDIOC_PRIVATE + 0x04, int)
-
-#define HWCAM_V4L2_IOCTL_GET_GRAPHIC_BUF \
-    _IOR('A', BASE_VIDIOC_PRIVATE + 0x05, hwcam_graphic_buf_info_t)
-
 #define HWCAM_V4L2_IOCTL_GET_BUF \
     _IOR('A', BASE_VIDIOC_PRIVATE + 0x06, hwcam_buf_status_t)
 
@@ -484,6 +513,7 @@ typedef enum _tag_hwcam_cfgreq2dev_kind
     HWCAM_CFGDEV_REQ_MIN                                =   HWCAM_CFGDEV_REQUEST,
     HWCAM_CFGDEV_REQ_MOUNT_PIPELINE,
     HWCAM_CFGDEV_REQ_GUARD_THERMAL,
+    HWCAM_CFGDEV_REQ_DUMP_MEMINFO,
     HWCAM_CFGDEV_REQ_MAX,
 } hwcam_cfgreq2dev_kind_t;
 

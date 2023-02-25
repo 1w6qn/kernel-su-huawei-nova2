@@ -15,6 +15,15 @@ cp -rf scripts ${kernel_out_dir}
 cp -rf include ${kernel_out_dir}
 cp -rf arch/${SRCARCH}/include ${kernel_out_dir} --parents
 
+# clang LTO copy all the obj files
+# use DISABLE_LTO_CLANG flag to detect clang LTO
+if [ -n "${DISABLE_LTO_CLANG}" ]; then
+	for ofile in $@; do
+		odir=${ofile%/*}
+		cp -rf $odir ${kernel_out_dir} --parents
+	done
+fi
+
 cd ${srctree}
 cp -rf scripts ${kernel_src_dir}
 cp -rfL include ${kernel_src_dir}
@@ -26,8 +35,10 @@ cp -rf arch/${SRCARCH}/boot/dts/Makefile ${kernel_src_dir} --parents
 cp -rf arch/arm64/include ${kernel_src_dir} --parents
 cp -rf arch/arm/include ${kernel_src_dir} --parents
 
-
+if [ "${singleap}"x != "true"x ]; then
 export KBUILD_VMLINUX_MAIN="${KBUILD_VMLINUX_MAIN}  drivers/hisi/modem/built-in.o"
+fi
+
 echo "#!/bin/bash" > ${kernel_out_dir}/link-vmlinux-new.sh
 printenv | sed "s/^/export &/g;s/=/='/;s/$/&'/g" >> ${kernel_out_dir}/link-vmlinux-new.sh
 sed -i "/CCACHE_DIR=/d" ${kernel_out_dir}/link-vmlinux-new.sh

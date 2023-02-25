@@ -594,7 +594,8 @@ static int ignore_undef_symbol(struct elf_info *info, const char *symname)
 		if (strncmp(symname, "_restgpr0_", sizeof("_restgpr0_") - 1) == 0 ||
 		    strncmp(symname, "_savegpr0_", sizeof("_savegpr0_") - 1) == 0 ||
 		    strncmp(symname, "_restvr_", sizeof("_restvr_") - 1) == 0 ||
-		    strncmp(symname, "_savevr_", sizeof("_savevr_") - 1) == 0)
+		    strncmp(symname, "_savevr_", sizeof("_savevr_") - 1) == 0 ||
+		    strcmp(symname, ".TOC.") == 0)
 			return 1;
 	/* Do not ignore this symbol */
 	return 0;
@@ -648,7 +649,7 @@ static void handle_modversions(struct module *mod, struct elf_info *info,
 			if (ELF_ST_TYPE(sym->st_info) == STT_SPARC_REGISTER)
 				break;
 			if (symname[0] == '.') {
-				char *munged = strdup(symname);
+				char *munged = NOFAIL(strdup(symname));
 				munged[0] = '_';
 				munged[1] = toupper(munged[1]);
 				symname = munged;
@@ -837,6 +838,7 @@ static const char *const section_white_list[] =
 	".cmem*",			/* EZchip */
 	".fmt_slot*",			/* EZchip */
 	".gnu.lto*",
+	".discard.*",
 	NULL
 };
 
@@ -887,7 +889,7 @@ static void check_section(const char *modname, struct elf_info *elf,
 
 #define DATA_SECTIONS ".data", ".data.rel"
 #define TEXT_SECTIONS ".text", ".text.unlikely", ".sched.text", \
-		".kprobes.text"
+		".kprobes.text", ".cpuidle.text"
 #define OTHER_TEXT_SECTIONS ".ref.text", ".head.text", ".spinlock.text", \
 		".fixup", ".entry.text", ".exception.text", ".text.*", \
 		".coldtext"
@@ -1310,7 +1312,7 @@ static Elf_Sym *find_elf_symbol2(struct elf_info *elf, Elf_Addr addr,
 static char *sec2annotation(const char *s)
 {
 	if (match(s, init_exit_sections)) {
-		char *p = malloc(20);
+		char *p = NOFAIL(malloc(20));
 		char *r = p;
 
 		*p++ = '_';
@@ -1330,7 +1332,7 @@ static char *sec2annotation(const char *s)
 			strcat(p, " ");
 		return r;
 	} else {
-		return strdup("");
+		return NOFAIL(strdup(""));
 	}
 }
 
@@ -2031,7 +2033,7 @@ void buf_write(struct buffer *buf, const char *s, int len)
 {
 	if (buf->size - buf->pos < len) {
 		buf->size += len + SZ;
-		buf->p = realloc(buf->p, buf->size);
+		buf->p = NOFAIL(realloc(buf->p, buf->size));
 	}
 	strncpy(buf->p + buf->pos, s, len);
 	buf->pos += len;

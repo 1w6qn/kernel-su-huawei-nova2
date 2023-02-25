@@ -27,6 +27,7 @@ int hisi_usb_start_hifi_usb_reset_power(void);
  * switch to AP usb host from hifi usb.
  */
 void hisi_usb_stop_hifi_usb(void);
+void hisi_usb_stop_hifi_usb_reset_power(void);
 
 /**
  * Wether a usb_device using hifi usb.
@@ -53,6 +54,12 @@ void stop_hifi_usb(void);
  */
 void reset_hifi_usb(void);
 
+int get_never_hifi_usb_value(void);
+
+int get_always_hifi_usb_value(void);
+
+int get_hifi_usb_retry_count(void);
+
 int hifi_usb_hibernate(void);
 
 int hifi_usb_revive(void);
@@ -71,6 +78,9 @@ static inline bool hisi_usb_using_hifi_usb(struct usb_device *udev){return false
 static inline int start_hifi_usb(void){return -1;}
 static inline void stop_hifi_usb(void){}
 static inline void reset_hifi_usb(void){}
+static inline int get_never_hifi_usb_value(void){return 0;}
+static inline int get_always_hifi_usb_value(void){return 0;}
+static inline int get_hifi_usb_retry_count(void){return 0;}
 static inline int hifi_usb_hibernate(void){return -1;}
 static inline int hifi_usb_revive(void){return -1;}
 static inline int hisi_usb_check_hifi_usb_status(enum hifi_usb_status_trigger trigger){return -1;}

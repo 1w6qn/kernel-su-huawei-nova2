@@ -195,16 +195,6 @@ static void zbud_zpool_unmap(void *pool, unsigned long handle)
 	zbud_unmap(pool, handle);
 }
 
-static int zbud_zpool_compact(void *pool, unsigned long *compacted)
-{
-	return -EINVAL;
-}
-
-static void zbud_zpool_stats(void *pool, struct zpool_stats *stats)
-{
-	/* no-op */
-}
-
 static u64 zbud_zpool_total_size(void *pool)
 {
 	return zbud_get_pool_size(pool) * PAGE_SIZE;
@@ -220,8 +210,6 @@ static struct zpool_driver zbud_zpool_driver = {
 	.shrink =	zbud_zpool_shrink,
 	.map =		zbud_zpool_map,
 	.unmap =	zbud_zpool_unmap,
-	.compact =	zbud_zpool_compact,
-	.stats =	zbud_zpool_stats,
 	.total_size =	zbud_zpool_total_size,
 };
 
@@ -319,7 +307,7 @@ struct zbud_pool *zbud_create_pool(gfp_t gfp, const struct zbud_ops *ops)
 	struct zbud_pool *pool;
 	int i;
 
-	pool = kzalloc(sizeof(struct zbud_pool), GFP_KERNEL);
+	pool = kzalloc(sizeof(struct zbud_pool), gfp);
 	if (!pool)
 		return NULL;
 	spin_lock_init(&pool->lock);
@@ -475,9 +463,6 @@ void zbud_free(struct zbud_pool *pool, unsigned long handle)
 	spin_unlock(&pool->lock);
 }
 
-#define list_tail_entry(ptr, type, member) \
-	list_entry((ptr)->prev, type, member)
-
 /**
  * zbud_reclaim_page() - evicts allocations from a pool page and frees it
  * @pool:	pool from which a page will attempt to be evicted
@@ -526,7 +511,7 @@ int zbud_reclaim_page(struct zbud_pool *pool, unsigned int retries)
 		return -EINVAL;
 	}
 	for (i = 0; i < retries; i++) {
-		zhdr = list_tail_entry(&pool->lru, struct zbud_header, lru);
+		zhdr = list_last_entry(&pool->lru, struct zbud_header, lru);
 		list_del(&zhdr->lru);
 		list_del(&zhdr->buddy);
 		/* Protect zbud page against free */

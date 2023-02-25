@@ -18,6 +18,7 @@
 #include <linux/security.h>
 #include <linux/binfmts.h>
 #include <linux/cn_proc.h>
+#include <linux/hisi/hisi_hkip.h>
 
 #if 0
 #define kdebug(FMT, ...)						\
@@ -277,6 +278,8 @@ struct cred *prepare_creds(void)
 	if (security_prepare_creds(new, old, GFP_KERNEL) < 0)
 		goto error;
 	validate_creds(new);
+	if (unlikely(hkip_check_xid_root()))
+		goto error;
 	return new;
 
 error:
@@ -482,6 +485,8 @@ int commit_creds(struct cred *new)
 	    !gid_eq(new->fsgid, old->fsgid))
 		proc_id_connector(task, PROC_EVENT_GID);
 
+	hkip_update_xid_root(new);
+
 	/* release the old obj and subj refs both */
 	put_cred(old);
 	put_cred(old);
@@ -569,8 +574,8 @@ EXPORT_SYMBOL(revert_creds);
 void __init cred_init(void)
 {
 	/* allocate a slab in which we can store credentials */
-	cred_jar = kmem_cache_create("cred_jar", sizeof(struct cred),
-				     0, SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
+	cred_jar = kmem_cache_create("cred_jar", sizeof(struct cred), 0,
+			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT, NULL);
 }
 
 /**

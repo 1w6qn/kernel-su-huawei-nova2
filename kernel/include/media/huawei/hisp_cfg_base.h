@@ -8,6 +8,7 @@
 #include <linux/videodev2.h>
 #include <media/huawei/camera.h>
 #include <linux/compat.h>
+#include <linux/iommu.h>
 
 enum {
 	HISP_NAME_SIZE = 32,
@@ -28,22 +29,24 @@ typedef struct _tag_hisp_event {
 
 // daemon  IOMMU define diff with kernel define, follow daemon
 // vendor/hisi/ap/bionic/libc/kernel/uapi/media/huawei/mapmodule_cfg.h
-enum
-{
-    POOL_IOMMU_READ    = 1 << 0,
-    POOL_IOMMU_WRITE   = 1 << 1,
-    POOL_IOMMU_EXEC    = 1 << 2,
-    POOL_IOMMU_SEC     = 1 << 3,
-    POOL_IOMMU_CACHE   = 1 << 4,
-    POOL_IOMMU_DEVICE  = 1 << 5,
-};
+// enum
+// {
+//     POOL_IOMMU_READ    = 1 << 0,
+//     POOL_IOMMU_WRITE   = 1 << 1,
+//     POOL_IOMMU_EXEC    = 1 << 2,
+//     POOL_IOMMU_SEC     = 1 << 3,
+//     POOL_IOMMU_CACHE   = 1 << 4,
+//     POOL_IOMMU_DEVICE  = 1 << 5,
+// };
 
 enum mapType
 {
     MAP_TYPE_DYNAMIC = 0,
+    MAP_TYPE_RAW2YUV,
     MAP_TYPE_STATIC,
     MAP_TYPE_STATIC_SEC,
     MAP_TYPE_DYNAMIC_CARVEOUT,
+    MAP_TYPE_STATIC_ISP_SEC,
     MAP_TYPE_MAX,
 };
 
@@ -59,6 +62,7 @@ typedef struct addr_params
     size_t offset_in_pool;
     size_t pool_align_size;
     uint32_t security_isp_mode;
+    uint32_t isApCached;
 }addr_param_t;
 
 // enum hisi_isp_rproc_case_attr {
@@ -72,7 +76,10 @@ struct hisp_cfg_data {
 	int cfgtype;
 	int mode;
 	int isSecure;
-	addr_param_t param;
+	union {
+		addr_param_t param;
+		uint32_t cfgdata[4];
+	};
 };
 
 enum hisp_config_type {
@@ -85,9 +92,14 @@ enum hisp_config_type {
     HISP_CONFIG_ALLOC_MEM,
     HISP_CONFIG_FREE_MEM,
     HISP_CONFIG_ISP_TURBO,
+    HISP_CONFIG_ISP_NORMAL,
     HISP_CONFIG_ISP_LOWPOWER,
+    HISP_CONFIG_ISP_ULTRALOW,
     HISP_CONFIG_R8_TURBO,
+    HISP_CONFIG_R8_NORMAL,
     HISP_CONFIG_R8_LOWPOWER,
+    HISP_CONFIG_R8_ULTRALOW,
+    HISP_CONFIG_PROC_TIMEOUT,
     HISP_CONFIG_MAX_INDEX
 };
 

@@ -40,71 +40,14 @@ static int mincore_hugetlb(pte_t *pte, unsigned long hmask, unsigned long addr,
 	return 0;
 }
 
-/*
- * Later we can get more picky about what "in core" means precisely.
- * For now, simply check to see if the page is in the page cache,
- * and is up to date; i.e. that no page-in operation would be required
- * at this time if an application were to map and access this page.
- */
-static unsigned char mincore_page(struct address_space *mapping, pgoff_t pgoff)
-{
-	unsigned char present = 0;
-	struct page *page;
-
-	/*
-	 * When tmpfs swaps out a page from a file, any process mapping that
-	 * file will not get a swp_entry_t in its pte, but rather it is like
-	 * any other file mapping (ie. marked !present and faulted in with
-	 * tmpfs's .fault). So swapped out tmpfs mappings are tested here.
-	 */
-#ifdef CONFIG_SWAP
-	if (shmem_mapping(mapping)) {
-		page = find_get_entry(mapping, pgoff);
-		/*
-		 * shmem/tmpfs may return swap: account for swapcache
-		 * page too.
-		 */
-		if (radix_tree_exceptional_entry(page)) {
-			swp_entry_t swp = radix_to_swp_entry(page);
-			page = find_get_page(swap_address_space(swp), swp.val);
-		}
-	} else
-		page = find_get_page(mapping, pgoff);
-#else
-	page = find_get_page(mapping, pgoff);
-#endif
-	if (page) {
-		present = PageUptodate(page);
-		page_cache_release(page);
-	}
-
-	return present;
-}
-
-static int __mincore_unmapped_range(unsigned long addr, unsigned long end,
-				struct vm_area_struct *vma, unsigned char *vec)
-{
-	unsigned long nr = (end - addr) >> PAGE_SHIFT;
-	int i;
-
-	if (vma->vm_file) {
-		pgoff_t pgoff;
-
-		pgoff = linear_page_index(vma, addr);
-		for (i = 0; i < nr; i++, pgoff++)
-			vec[i] = mincore_page(vma->vm_file->f_mapping, pgoff);
-	} else {
-		for (i = 0; i < nr; i++)
-			vec[i] = 0;
-	}
-	return nr;
-}
-
 static int mincore_unmapped_range(unsigned long addr, unsigned long end,
 				   struct mm_walk *walk)
 {
-	walk->private += __mincore_unmapped_range(addr, end,
-						  walk->vma, walk->private);
+	unsigned char *vec = walk->private;
+	unsigned long nr = (end - addr) >> PAGE_SHIFT;
+
+	memset(vec, 0, nr);
+	walk->private += nr;
 	return 0;
 }
 
@@ -117,14 +60,16 @@ static int mincore_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	unsigned char *vec = walk->private;
 	int nr = (end - addr) >> PAGE_SHIFT;
 
-	if (pmd_trans_huge_lock(pmd, vma, &ptl) == 1) {
+	ptl = pmd_trans_huge_lock(pmd, vma);
+	if (ptl) {
 		memset(vec, 1, nr);
 		spin_unlock(ptl);
 		goto out;
 	}
 
+	/* We'll consider a THP page under construction to be there */
 	if (pmd_trans_unstable(pmd)) {
-		__mincore_unmapped_range(addr, end, vma, vec);
+		memset(vec, 1, nr);
 		goto out;
 	}
 
@@ -133,28 +78,17 @@ static int mincore_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 		pte_t pte = *ptep;
 
 		if (pte_none(pte))
-			__mincore_unmapped_range(addr, addr + PAGE_SIZE,
-						 vma, vec);
+			*vec = 0;
 		else if (pte_present(pte))
 			*vec = 1;
 		else { /* pte is a swap entry */
 			swp_entry_t entry = pte_to_swp_entry(pte);
 
-			if (non_swap_entry(entry)) {
-				/*
-				 * migration or hwpoison entries are always
-				 * uptodate
-				 */
-				*vec = 1;
-			} else {
-#ifdef CONFIG_SWAP
-				*vec = mincore_page(swap_address_space(entry),
-					entry.val);
-#else
-				WARN_ON(1);
-				*vec = 1;
-#endif
-			}
+			/*
+			 * migration or hwpoison entries are always
+			 * uptodate
+			 */
+			*vec = !!non_swap_entry(entry);
 		}
 		vec++;
 	}
@@ -210,7 +144,7 @@ static long do_mincore(unsigned long addr, unsigned long pages, unsigned char *v
  * return values:
  *  zero    - success
  *  -EFAULT - vec points to an illegal address
- *  -EINVAL - addr is not a multiple of PAGE_CACHE_SIZE
+ *  -EINVAL - addr is not a multiple of PAGE_SIZE
  *  -ENOMEM - Addresses in the range [addr, addr + len] are
  *		invalid for the address space of this process, or
  *		specify one or more pages which are not currently
@@ -225,14 +159,14 @@ SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
 	unsigned char *tmp;
 
 	/* Check the start address: needs to be page-aligned.. */
- 	if (start & ~PAGE_CACHE_MASK)
+	if (start & ~PAGE_MASK)
 		return -EINVAL;
 
 	/* ..and we need to be passed a valid user-space range */
 	if (!access_ok(VERIFY_READ, (void __user *) start, len))
 		return -ENOMEM;
 
-	/* This also avoids any overflows on PAGE_CACHE_ALIGN */
+	/* This also avoids any overflows on PAGE_ALIGN */
 	pages = len >> PAGE_SHIFT;
 	pages += (offset_in_page(len)) != 0;
 

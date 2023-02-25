@@ -12,6 +12,7 @@
 #include <linux/dcache.h>
 #include <linux/magic.h>
 #include <linux/types.h>
+#include <linux/pmalloc.h>
 #include "flask.h"
 
 #define SECSID_NULL			0x00000000 /* unspecified SID */
@@ -39,11 +40,7 @@
 
 /* Range of policy versions we understand*/
 #define POLICYDB_VERSION_MIN   POLICYDB_VERSION_BASE
-#ifdef CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX
-#define POLICYDB_VERSION_MAX	CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX_VALUE
-#else
 #define POLICYDB_VERSION_MAX	POLICYDB_VERSION_XPERMS_IOCTL
-#endif
 
 /* Mask for just the mount related flags */
 #define SE_MNTMASK	0x0f
@@ -65,9 +62,17 @@
 #define DEFCONTEXT_STR	"defcontext="
 #define LABELSUPP_STR "seclabel"
 
+#ifdef CONFIG_HISI_SELINUX_PROT
+#define HISI_SELINUX_PROT const
+#else
+#define HISI_SELINUX_PROT
+#endif
+
 struct netlbl_lsm_secattr;
 
 extern int selinux_enabled;
+
+extern struct gen_pool *selinux_pool;
 
 /* Policy capabilities */
 enum {
@@ -186,6 +191,9 @@ int security_node_sid(u16 domain, void *addr, u32 addrlen,
 
 int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
 				 u16 tclass);
+
+int security_validate_transition_user(u32 oldsid, u32 newsid, u32 tasksid,
+				      u16 tclass);
 
 int security_bounded_transition(u32 oldsid, u32 newsid);
 

@@ -62,6 +62,7 @@
 #include <asm/cacheflush.h>
 #include <linux/hash.h>
 #include <linux/genetlink.h>
+#include <linux/nospec.h>
 
 #include <net/net_namespace.h>
 #include <net/sock.h>
@@ -95,6 +96,44 @@ struct netlink_table *nl_table __read_mostly;
 EXPORT_SYMBOL_GPL(nl_table);
 
 static DECLARE_WAIT_QUEUE_HEAD(nl_table_wait);
+
+static struct lock_class_key nlk_cb_mutex_keys[MAX_LINKS];
+
+static const char *const nlk_cb_mutex_key_strings[MAX_LINKS + 1] = {
+	"nlk_cb_mutex-ROUTE",
+	"nlk_cb_mutex-1",
+	"nlk_cb_mutex-USERSOCK",
+	"nlk_cb_mutex-FIREWALL",
+	"nlk_cb_mutex-SOCK_DIAG",
+	"nlk_cb_mutex-NFLOG",
+	"nlk_cb_mutex-XFRM",
+	"nlk_cb_mutex-SELINUX",
+	"nlk_cb_mutex-ISCSI",
+	"nlk_cb_mutex-AUDIT",
+	"nlk_cb_mutex-FIB_LOOKUP",
+	"nlk_cb_mutex-CONNECTOR",
+	"nlk_cb_mutex-NETFILTER",
+	"nlk_cb_mutex-IP6_FW",
+	"nlk_cb_mutex-DNRTMSG",
+	"nlk_cb_mutex-KOBJECT_UEVENT",
+	"nlk_cb_mutex-GENERIC",
+	"nlk_cb_mutex-17",
+	"nlk_cb_mutex-SCSITRANSPORT",
+	"nlk_cb_mutex-ECRYPTFS",
+	"nlk_cb_mutex-RDMA",
+	"nlk_cb_mutex-CRYPTO",
+	"nlk_cb_mutex-SMC",
+	"nlk_cb_mutex-23",
+	"nlk_cb_mutex-24",
+	"nlk_cb_mutex-25",
+	"nlk_cb_mutex-26",
+	"nlk_cb_mutex-27",
+	"nlk_cb_mutex-28",
+	"nlk_cb_mutex-29",
+	"nlk_cb_mutex-30",
+	"nlk_cb_mutex-31",
+	"nlk_cb_mutex-MAX_LINKS"
+};
 
 static int netlink_dump(struct sock *sk);
 static void netlink_skb_destructor(struct sk_buff *skb);
@@ -223,10 +262,8 @@ static int __netlink_deliver_tap_skb(struct sk_buff *skb,
 	struct sock *sk = skb->sk;
 	int ret = -ENOMEM;
 
-	if (!net_eq(dev_net(dev), sock_net(sk)) &&
-	    !net_eq(dev_net(dev), &init_net)) {
+	if (!net_eq(dev_net(dev), sock_net(sk)))
 		return 0;
-	}
 
 	dev_hold(dev);
 
@@ -590,6 +627,9 @@ static int __netlink_create(struct net *net, struct socket *sock,
 	} else {
 		nlk->cb_mutex = &nlk->cb_def_mutex;
 		mutex_init(nlk->cb_mutex);
+		lockdep_set_class_and_name(nlk->cb_mutex,
+					   nlk_cb_mutex_keys + protocol,
+					   nlk_cb_mutex_key_strings[protocol]);
 	}
 	init_waitqueue_head(&nlk->wait);
 
@@ -615,6 +655,7 @@ static int netlink_create(struct net *net, struct socket *sock, int protocol,
 
 	if (protocol < 0 || protocol >= MAX_LINKS)
 		return -EPROTONOSUPPORT;
+	protocol = array_index_nospec(protocol, MAX_LINKS);
 
 	netlink_lock_table();
 #ifdef CONFIG_MODULES
@@ -945,6 +986,11 @@ static int netlink_bind(struct socket *sock, struct sockaddr *addr,
 			return err;
 	}
 
+	if (nlk->ngroups == 0)
+		groups = 0;
+	else if (nlk->ngroups < 8*sizeof(groups))
+		groups &= (1UL << nlk->ngroups) - 1;
+
 	bound = nlk->bound;
 	if (bound) {
 		/* Ensure nlk->portid is up-to-date. */
@@ -1015,6 +1061,9 @@ static int netlink_connect(struct socket *sock, struct sockaddr *addr,
 	if (addr->sa_family != AF_NETLINK)
 		return -EINVAL;
 
+	if (alen < sizeof(struct sockaddr_nl))
+		return -EINVAL;
+
 	if ((nladdr->nl_groups || nladdr->nl_pid) &&
 	    !netlink_allowed(sock, NL_CFG_F_NONROOT_SEND))
 		return -EPERM;
@@ -1053,6 +1102,14 @@ static int netlink_getname(struct socket *sock, struct sockaddr *addr,
 		nladdr->nl_groups = nlk->groups ? nlk->groups[0] : 0;
 	}
 	return 0;
+}
+
+static int netlink_ioctl(struct socket *sock, unsigned int cmd,
+			 unsigned long arg)
+{
+	/* try to hand this ioctl down to the NIC drivers.
+	 */
+	return -ENOIOCTLCMD;
 }
 
 static struct sock *netlink_getsockbyportid(struct sock *ssk, u32 portid)
@@ -1269,14 +1326,6 @@ retry:
 	return netlink_sendskb(sk, skb);
 }
 EXPORT_SYMBOL(netlink_unicast);
-
-struct sk_buff *__netlink_alloc_skb(struct sock *ssk, unsigned int size,
-				    unsigned int ldiff, u32 dst_portid,
-				    gfp_t gfp_mask)
-{
-	return alloc_skb(size, gfp_mask);
-}
-EXPORT_SYMBOL_GPL(__netlink_alloc_skb);
 
 int netlink_has_listeners(struct sock *sk, unsigned int group)
 {
@@ -1753,6 +1802,8 @@ static int netlink_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 
 	if (msg->msg_namelen) {
 		err = -EINVAL;
+		if (msg->msg_namelen < sizeof(struct sockaddr_nl))
+			goto out;
 		if (addr->nl_family != AF_NETLINK)
 			goto out;
 		dst_portid = addr->nl_pid;
@@ -2082,7 +2133,7 @@ static int netlink_dump(struct sock *sk)
 	struct sk_buff *skb = NULL;
 	struct nlmsghdr *nlh;
 	struct module *module;
-	int len, err = -ENOBUFS;
+	int err = -ENOBUFS;
 	int alloc_min_size;
 	int alloc_size;
 
@@ -2105,14 +2156,13 @@ static int netlink_dump(struct sock *sk)
 
 	if (alloc_min_size < nlk->max_recvmsg_len) {
 		alloc_size = nlk->max_recvmsg_len;
-		skb = netlink_alloc_skb(sk, alloc_size, nlk->portid,
-					(GFP_KERNEL & ~__GFP_DIRECT_RECLAIM) |
-					__GFP_NOWARN | __GFP_NORETRY);
+		skb = alloc_skb(alloc_size,
+				(GFP_KERNEL & ~__GFP_DIRECT_RECLAIM) |
+				__GFP_NOWARN | __GFP_NORETRY);
 	}
 	if (!skb) {
 		alloc_size = alloc_min_size;
-		skb = netlink_alloc_skb(sk, alloc_size, nlk->portid,
-					GFP_KERNEL);
+		skb = alloc_skb(alloc_size, GFP_KERNEL);
 	}
 	if (!skb)
 		goto errout_skb;
@@ -2130,9 +2180,11 @@ static int netlink_dump(struct sock *sk)
 	skb_reserve(skb, skb_tailroom(skb) - alloc_size);
 	netlink_skb_set_owner_r(skb, sk);
 
-	len = cb->dump(skb, cb);
+	if (nlk->dump_done_errno > 0)
+		nlk->dump_done_errno = cb->dump(skb, cb);
 
-	if (len > 0) {
+	if (nlk->dump_done_errno > 0 ||
+	    skb_tailroom(skb) < nlmsg_total_size(sizeof(nlk->dump_done_errno))) {
 		mutex_unlock(nlk->cb_mutex);
 
 		if (sk_filter(sk, skb))
@@ -2142,13 +2194,15 @@ static int netlink_dump(struct sock *sk)
 		return 0;
 	}
 
-	nlh = nlmsg_put_answer(skb, cb, NLMSG_DONE, sizeof(len), NLM_F_MULTI);
-	if (!nlh)
+	nlh = nlmsg_put_answer(skb, cb, NLMSG_DONE,
+			       sizeof(nlk->dump_done_errno), NLM_F_MULTI);
+	if (WARN_ON(!nlh))
 		goto errout_skb;
 
 	nl_dump_check_consistent(cb, nlh);
 
-	memcpy(nlmsg_data(nlh), &len, sizeof(len));
+	memcpy(nlmsg_data(nlh), &nlk->dump_done_errno,
+	       sizeof(nlk->dump_done_errno));
 
 	if (sk_filter(sk, skb))
 		kfree_skb(skb);
@@ -2204,6 +2258,7 @@ int __netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 
 	cb = &nlk->cb;
 	memset(cb, 0, sizeof(*cb));
+	cb->start = control->start;
 	cb->dump = control->dump;
 	cb->done = control->done;
 	cb->nlh = nlh;
@@ -2212,11 +2267,19 @@ int __netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 	cb->min_dump_alloc = control->min_dump_alloc;
 	cb->skb = skb;
 
+	if (cb->start) {
+		ret = cb->start(cb);
+		if (ret)
+			goto error_put;
+	}
+
 	nlk->cb_running = true;
+	nlk->dump_done_errno = INT_MAX;
 
 	mutex_unlock(nlk->cb_mutex);
 
 	ret = netlink_dump(sk);
+
 	sock_put(sk);
 
 	if (ret)
@@ -2227,6 +2290,8 @@ int __netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 	 */
 	return -EINTR;
 
+error_put:
+	module_put(control->module);
 error_unlock:
 	sock_put(sk);
 	mutex_unlock(nlk->cb_mutex);
@@ -2250,8 +2315,7 @@ void netlink_ack(struct sk_buff *in_skb, struct nlmsghdr *nlh, int err)
 	if (!(nlk->flags & NETLINK_F_CAP_ACK) && err)
 		payload += nlmsg_len(nlh);
 
-	skb = netlink_alloc_skb(in_skb->sk, nlmsg_total_size(payload),
-				NETLINK_CB(in_skb).portid, GFP_KERNEL);
+	skb = nlmsg_new(payload, GFP_KERNEL);
 	if (!skb) {
 		struct sock *sk;
 
@@ -2367,7 +2431,8 @@ static int netlink_walk_start(struct nl_seq_iter *iter)
 {
 	int err;
 
-	err = rhashtable_walk_init(&nl_table[iter->link].hash, &iter->hti);
+	err = rhashtable_walk_init(&nl_table[iter->link].hash, &iter->hti,
+				   GFP_KERNEL);
 	if (err) {
 		iter->link = MAX_LINKS;
 		return err;
@@ -2526,7 +2591,7 @@ static const struct proto_ops netlink_ops = {
 	.accept =	sock_no_accept,
 	.getname =	netlink_getname,
 	.poll =		datagram_poll,
-	.ioctl =	sock_no_ioctl,
+	.ioctl =	netlink_ioctl,
 	.listen =	sock_no_listen,
 	.shutdown =	sock_no_shutdown,
 	.setsockopt =	netlink_setsockopt,

@@ -86,7 +86,6 @@ int ip6_find_1stfragopt(struct sk_buff *skb, u8 **nexthdr)
 
 	while (offset <= packet_len) {
 		struct ipv6_opt_hdr *exthdr;
-		unsigned int len;
 
 		switch (**nexthdr) {
 
@@ -112,10 +111,9 @@ int ip6_find_1stfragopt(struct sk_buff *skb, u8 **nexthdr)
 
 		exthdr = (struct ipv6_opt_hdr *)(skb_network_header(skb) +
 						 offset);
-		len = ipv6_optlen(exthdr);
-		if (len + offset >= IPV6_MAXPLEN)
+		offset += ipv6_optlen(exthdr);
+		if (offset > IPV6_MAXPLEN)
 			return -EINVAL;
-		offset += len;
 		*nexthdr = &exthdr->nexthdr;
 	}
 
@@ -153,6 +151,13 @@ int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 		len = 0;
 	ipv6_hdr(skb)->payload_len = htons(len);
 	IP6CB(skb)->nhoff = offsetof(struct ipv6hdr, nexthdr);
+
+	/* if egress device is enslaved to an L3 master device pass the
+	 * skb to its handler for processing
+	 */
+	skb = l3mdev_ip6_out(sk, skb);
+	if (unlikely(!skb))
+		return 0;
 
 	skb->protocol = htons(ETH_P_IPV6);
 

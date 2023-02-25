@@ -39,7 +39,7 @@
 #include "hi3630_asp_common.h"
 #include "hi3xxx_asp_dma.h"
 #include "asp_dma.h"
-#include "hi6210_pcm.h"
+#include "hisi_pcm_hifi.h"
 #include "hifi_lpp.h"
 #include "huawei_platform/log/imonitor.h"
 #include "huawei_platform/log/imonitor_keys.h"
@@ -90,17 +90,6 @@ static PCM_DMA_BUF_CONFIG  hi3xxx_pcm_dma_lli_array[PCM_STREAM_MAX] =
 enum hi3xxx_asp_dmac_status {
 	STATUS_DMAC_STOP = 0,
 	STATUS_DMAC_RUNNING,
-};
-
-enum pcm_device {
-	PCM_DEVICE = 0,
-	PCM_DEVICE_MODEM,
-	PCM_DEVICE_FM,
-	PCM_DEVICE_BT,
-	PCM_DEVICE_OFFLOAD,
-	PCM_DEVICE_DIRECT,
-	PCM_DEVICE_LOW_LATENCY,
-	PCM_DEVICE_TOTAL,
 };
 
 enum {
@@ -536,9 +525,16 @@ static int hi3xxx_intr_dmac_handle(unsigned short int_type, unsigned long para, 
 	}
 
 	runtime = substream->runtime;
-	BUG_ON(NULL == runtime);
+	if (!runtime) {
+		pr_err("[%s:%d] runtime is NULL\n", __FUNCTION__, __LINE__);
+		return -EINVAL;
+	}
+
 	prtd = runtime->private_data;
-	BUG_ON(NULL == prtd);
+	if (!prtd) {
+		pr_err("[%s:%d] prtd is NULL\n", __FUNCTION__, __LINE__);
+		return -EINVAL;
+	}
 
 	if (SNDRV_PCM_STREAM_PLAYBACK == substream->stream) {
 		log_tag = (unsigned char *)"StreamPlayback";
@@ -858,12 +854,10 @@ static int hi3xxx_asp_dmac_close(struct snd_pcm_substream *substream)
 {
 	struct hi3xxx_asp_dmac_runtime_data *prtd = substream->runtime->private_data;
 
-	if (NULL == prtd) {
+	if (NULL == prtd || prtd->pdata == NULL) {
 		pr_err("[%s:%d] prtd is NULL\n", __FUNCTION__, __LINE__);
 		return -ENOMEM;
 	}
-
-	BUG_ON(NULL == prtd->pdata);
 
 	hi3xxx_asp_dmac_regulator_disable(prtd->pdata);
 
@@ -892,7 +886,7 @@ static int preallocate_dma_buffer(struct snd_pcm *pcm, int stream)
 	struct snd_pcm_substream 	*substream = pcm->streams[stream].substream;
 	struct snd_dma_buffer 		*buf = &substream->dma_buffer;
 
-	if ((pcm->device >= PCM_DEVICE_MAX) ||(stream >= PCM_STREAM_MAX)) {
+	if ((pcm->device >= PCM_DEVICE_TOTAL) ||(stream >= PCM_STREAM_MAX)) {
 		loge("Invalid argument  : device %d stream %d \n", pcm->device, stream);
 		return -EINVAL;
 	}
@@ -937,8 +931,10 @@ static int hi3xxx_asp_dmac_new(struct snd_soc_pcm_runtime *rtd)
 	struct snd_pcm  *pcm  = rtd->pcm;
 	int ret = 0;
 
-	BUG_ON(NULL == card);
-	BUG_ON(NULL == pcm);
+	if (!card || !pcm) {
+		pr_err("[%s:%d] card or pcm is NULL\n", __FUNCTION__, __LINE__);
+		return -EINVAL;
+	}
 
 	if (!card->dev->dma_mask)
 		card->dev->dma_mask = &hi3xxx_pcm_dmamask;
@@ -966,7 +962,8 @@ static int hi3xxx_asp_dmac_new(struct snd_soc_pcm_runtime *rtd)
 
 static void hi3xxx_asp_dmac_free(struct snd_pcm *pcm)
 {
-	BUG_ON(NULL == pcm);
+	WARN_ON(NULL == pcm);
+
 	if (pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream) {
 		dma_free_buffer(pcm, SNDRV_PCM_STREAM_PLAYBACK);
 	}
@@ -1143,7 +1140,7 @@ int hi3xxx_asp_dmac_runtime_suspend(struct device *dev)
 {
 	struct hi3xxx_asp_dmac_data *pdata = dev_get_drvdata(dev);
 
-	BUG_ON(NULL == pdata);
+	WARN_ON(NULL == pdata);
 
 	pr_info("[%s:%d] +\n", __FUNCTION__, __LINE__);
 
@@ -1159,7 +1156,7 @@ int hi3xxx_asp_dmac_runtime_resume(struct device *dev)
 	struct hi3xxx_asp_dmac_data *pdata = dev_get_drvdata(dev);
 	int ret;
 
-	BUG_ON(NULL == pdata);
+	WARN_ON(NULL == pdata);
 
 	pr_info("[%s:%d] +\n", __FUNCTION__, __LINE__);
 

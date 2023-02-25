@@ -29,15 +29,17 @@ static struct xfrm_policy_afinfo xfrm6_policy_afinfo;
 
 static struct dst_entry *xfrm6_dst_lookup(struct net *net, int tos, int oif,
 					  const xfrm_address_t *saddr,
-					  const xfrm_address_t *daddr)
+					  const xfrm_address_t *daddr,
+					  u32 mark)
 {
 	struct flowi6 fl6;
 	struct dst_entry *dst;
 	int err;
 
 	memset(&fl6, 0, sizeof(fl6));
-	fl6.flowi6_oif = oif;
+	fl6.flowi6_oif = l3mdev_master_ifindex_by_index(net, oif);
 	fl6.flowi6_flags = FLOWI_FLAG_SKIP_NH_OIF;
+	fl6.flowi6_mark = mark;
 	memcpy(&fl6.daddr, daddr, sizeof(fl6.daddr));
 	if (saddr)
 		memcpy(&fl6.saddr, saddr, sizeof(fl6.saddr));
@@ -54,12 +56,13 @@ static struct dst_entry *xfrm6_dst_lookup(struct net *net, int tos, int oif,
 }
 
 static int xfrm6_get_saddr(struct net *net, int oif,
-			   xfrm_address_t *saddr, xfrm_address_t *daddr)
+			   xfrm_address_t *saddr, xfrm_address_t *daddr,
+			   u32 mark)
 {
 	struct dst_entry *dst;
 	struct net_device *dev;
 
-	dst = xfrm6_dst_lookup(net, 0, oif, NULL, daddr);
+	dst = xfrm6_dst_lookup(net, 0, oif, NULL, daddr, mark);
 	if (IS_ERR(dst))
 		return -EHOSTUNREACH;
 
@@ -121,7 +124,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 	struct flowi6 *fl6 = &fl->u.ip6;
 	int onlyproto = 0;
 	const struct ipv6hdr *hdr = ipv6_hdr(skb);
-	u16 offset = sizeof(*hdr);
+	u32 offset = sizeof(*hdr);
 	struct ipv6_opt_hdr *exthdr;
 	const unsigned char *nh = skb_network_header(skb);
 	u16 nhoff = IP6CB(skb)->nhoff;
@@ -134,7 +137,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 	nexthdr = nh[nhoff];
 
 	if (skb_dst(skb))
-		oif = l3mdev_fib_oif(skb_dst(skb)->dev);
+		oif = skb_dst(skb)->dev->ifindex;
 
 	memset(fl6, 0, sizeof(struct flowi6));
 	fl6->flowi6_mark = skb->mark;
@@ -366,12 +369,12 @@ static void __net_exit xfrm6_net_sysctl_exit(struct net *net)
 		kfree(table);
 }
 #else /* CONFIG_SYSCTL */
-static int inline xfrm6_net_sysctl_init(struct net *net)
+static inline int xfrm6_net_sysctl_init(struct net *net)
 {
 	return 0;
 }
 
-static void inline xfrm6_net_sysctl_exit(struct net *net)
+static inline void xfrm6_net_sysctl_exit(struct net *net)
 {
 }
 #endif

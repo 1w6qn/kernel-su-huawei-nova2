@@ -56,6 +56,9 @@ struct mmc_command {
 #define MMC_RSP_R6	(MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE)
 #define MMC_RSP_R7	(MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE)
 
+/* Can be used by core to poll after switch to MMC HS mode */
+#define MMC_RSP_R1_NO_CRC	(MMC_RSP_PRESENT|MMC_RSP_OPCODE)
+
 #define mmc_resp_type(cmd)	((cmd)->flags & (MMC_RSP_PRESENT|MMC_RSP_136|MMC_RSP_CRC|MMC_RSP_BUSY|MMC_RSP_OPCODE))
 
 /*
@@ -116,7 +119,6 @@ struct mmc_data {
 
 #define MMC_DATA_WRITE	(1 << 8)
 #define MMC_DATA_READ	(1 << 9)
-#define MMC_DATA_STREAM	(1 << 10)
 
 	unsigned int		bytes_xfered;
 
@@ -138,8 +140,12 @@ struct mmc_request {
 	struct mmc_command	*task_mgmt;
 
 	struct completion	completion;
+	struct completion	cmd_completion;
 	void			(*done)(struct mmc_request *);/* completion function */
 	struct mmc_host		*host;
+
+	/* Allow other commands during this ongoing data transfer or busy wait */
+	bool			cap_cmd_during_tfr;
 	struct mmc_cmdq_req	*cmdq_req;
 	struct completion	cmdq_completion;
 	struct request		*req; /* associated block request */
@@ -165,6 +171,9 @@ extern void mmc_blk_cmdq_req_done(struct mmc_request *mrq);
 #endif
 extern int mmc_interrupt_hpi(struct mmc_card *);
 extern void mmc_wait_for_req(struct mmc_host *, struct mmc_request *);
+extern void mmc_wait_for_req_done(struct mmc_host *host,
+				  struct mmc_request *mrq);
+extern bool mmc_is_req_done(struct mmc_host *host, struct mmc_request *mrq);
 extern int mmc_wait_for_cmd(struct mmc_host *, struct mmc_command *, int);
 extern int mmc_app_cmd(struct mmc_host *, struct mmc_card *);
 extern int mmc_wait_for_app_cmd(struct mmc_host *, struct mmc_card *,

@@ -70,7 +70,6 @@
 #include <linux/shmem_fs.h>
 #include <linux/slab.h>
 #include <linux/perf_event.h>
-#include <linux/file.h>
 #include <linux/ptrace.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
@@ -81,6 +80,8 @@
 #include <linux/integrity.h>
 #include <linux/proc_ns.h>
 #include <linux/io.h>
+#include <linux/kaiser.h>
+#include <linux/cache.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -88,9 +89,8 @@
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
 
-#if (defined CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE) || \
-	(defined CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE_STRONG)
-#include <chipset_common/kernel_harden/kaslr.h>
+#ifdef CONFIG_HW_RECLAIM_ACCT
+#include <chipset_common/reclaim_acct/reclaim_acct.h>
 #endif
 #ifdef CONFIG_HUAWEI_BOOT_TIME
 #include <huawei_platform/boottime/hw_boottime.h>
@@ -100,10 +100,6 @@ static int kernel_init(void *);
 extern void init_IRQ(void);
 extern void fork_init(void);
 extern void radix_tree_init(void);
-
-#ifdef CONFIG_HW_MMC_MAINTENANCE_DATA
-#include <linux/mmc/hw_mmc_maintenance.h>
-#endif
 
 /*
  * Debug helper: via this flag we know that we are in 'early bootup code'
@@ -172,10 +168,10 @@ static const char *panic_later, *panic_param;
 
 extern const struct obs_kernel_param __setup_start[], __setup_end[];
 
-static int __init obsolete_checksetup(char *line)
+static bool __init obsolete_checksetup(char *line)
 {
 	const struct obs_kernel_param *p;
-	int had_early_param = 0;
+	bool had_early_param = false;
 
 	p = __setup_start;
 	do {
@@ -187,13 +183,13 @@ static int __init obsolete_checksetup(char *line)
 				 * Keep iterating, as we can have early
 				 * params and __setups of same names 8( */
 				if (line[n] == '\0' || line[n] == '=')
-					had_early_param = 1;
+					had_early_param = true;
 			} else if (!p->setup_func) {
 				pr_warn("Parameter %s is obsolete, ignored\n",
 					p->str);
-				return 1;
+				return true;
 			} else if (p->setup_func(line + n))
-				return 1;
+				return true;
 		}
 		p++;
 	} while (p < __setup_end);
@@ -363,6 +359,19 @@ static inline void setup_nr_cpu_ids(void) { }
 static inline void smp_prepare_cpus(unsigned int maxcpus) { }
 #endif
 
+static void remove_flag(char *cmd, const char *flag)
+{
+	char *start_addr, *end_addr;
+	/* Ensure all instances of a flag are removed */
+	while ((start_addr = strstr(cmd, flag))) {
+		end_addr = strchr(start_addr, ' ');
+		if (end_addr)
+			memmove(start_addr, end_addr + 1, strlen(end_addr));
+		else
+			*(start_addr - 1) = '\0';
+	}
+}
+
 /*
  * We need to store the untouched command line for future reference.
  * We also need to store the touched command line since the parameter
@@ -371,6 +380,16 @@ static inline void smp_prepare_cpus(unsigned int maxcpus) { }
  */
 static void __init setup_command_line(char *command_line)
 {
+	// magisk removes skip_initramfs from kernel
+	// so skip_initramfs won't be removed from cmdline
+	// and magisk will use SARInit which renders
+	// the device unbootable so we have to 'hide'
+	// skip_initramfs string
+	char skip_initramfs[] = "skip!initramfs";
+	skip_initramfs[4] = '_';
+	remove_flag(command_line, skip_initramfs);
+	remove_flag(boot_command_line, skip_initramfs);
+
 	saved_command_line =
 		memblock_virt_alloc(strlen(boot_command_line) + 1, 0);
 	initcall_command_line =
@@ -391,12 +410,11 @@ static void __init setup_command_line(char *command_line)
 
 static __initdata DECLARE_COMPLETION(kthreadd_done);
 
-static noinline void __init_refok rest_init(void)
+static noinline void __ref rest_init(void)
 {
 	int pid;
 
 	rcu_scheduler_starting();
-	smpboot_thread_init();
 	/*
 	 * We need to spawn init first so that it obtains pid 1, however
 	 * the init task will end up wanting to create kthreads, which, if
@@ -460,26 +478,12 @@ void __init parse_early_param(void)
 	done = 1;
 }
 
-/*
- *	Activate the first processor.
- */
-
-static void __init boot_cpu_init(void)
-{
-	int cpu = smp_processor_id();
-	/* Mark the boot cpu "present", "online" etc for SMP and UP case */
-	set_cpu_online(cpu, true);
-	set_cpu_active(cpu, true);
-	set_cpu_present(cpu, true);
-	set_cpu_possible(cpu, true);
-}
-
 void __init __weak smp_setup_processor_id(void)
 {
 }
 
 # if THREAD_SIZE >= PAGE_SIZE
-void __init __weak thread_info_cache_init(void)
+void __init __weak thread_stack_cache_init(void)
 {
 }
 #endif
@@ -494,35 +498,49 @@ static void __init mm_init(void)
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
-#ifdef CONFIG_HW_MMC_MAINTENANCE_DATA
-	mmc_bootmem = (void*)alloc_bootmem(MMC_BOOTMEM_SIZE);
-	mmc_bootmem_init(mmc_bootmem);
-#endif
 	mem_init();
 	kmem_cache_init();
 	percpu_init_late();
 	pgtable_init();
 	vmalloc_init();
 	ioremap_huge_init();
+	kaiser_init();
 }
+
+#ifdef CMDLINE_INFO_FILTER
+static void __init filter_args(char *cmdline) {
+	static char tmp_cmdline[COMMAND_LINE_SIZE] __initdata;
+	char *cmd_prefix = NULL;
+	char *cmd_suffix = NULL;
+	int len = 0;
+	strlcpy(tmp_cmdline, cmdline, COMMAND_LINE_SIZE);
+	cmd_prefix = strstr(tmp_cmdline, "androidboot.serialno");
+	if (cmd_prefix == NULL) {
+		pr_notice("Kernel command line: %s\n", tmp_cmdline);
+		return;
+	}
+	cmd_suffix = strstr(cmd_prefix, " ");
+	len = (cmd_suffix != NULL) ? (cmd_suffix - cmd_prefix)
+                             : (cmdline + strlen(cmdline) - cmd_prefix);
+	memset(cmd_prefix, '*', len);
+	pr_notice("Kernel command line: %s\n", tmp_cmdline);
+	return;
+}
+#endif
+
+#ifdef CONFIG_DEBUG_RODATA
+void mark_constdata_ro(void);
+#else
+static void mark_constdata_ro(void)
+{
+}
+#endif
 
 asmlinkage __visible void __init start_kernel(void)
 {
 	char *command_line;
 	char *after_dashes;
 
-	/*
-	 * Need to run as early as possible, to initialize the
-	 * lockdep hash:
-	 */
-	lockdep_init();
-#ifdef CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE
-	kstack_randomize_init();
-#endif
-#ifdef CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE_STRONG
-	kti_randomize_init();
-	set_init_thread_info((unsigned long)&init_stack);
-#endif
 	set_task_stack_end_magic(&init_task);
 	smp_setup_processor_id();
 	debug_objects_early_init();
@@ -545,17 +563,22 @@ asmlinkage __visible void __init start_kernel(void)
 	page_address_init();
 	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
+#ifdef CONFIG_HISI_EARLY_RODATA_PROTECTION
+/* setup_arch is the last function to alter the constdata content */
+	mark_constdata_ro();
+#endif
 	mm_init_cpumask(&init_mm);
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
 	setup_per_cpu_areas();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
+	boot_cpu_hotplug_init();
 
 	build_all_zonelists(NULL, NULL);
 	page_alloc_init();
 
-#ifdef HISI_SN_CMDLINE
-	pr_notice("Kernel command line: %s\n", boot_command_line);
+#ifdef CMDLINE_INFO_FILTER
+	filter_args(boot_command_line);
 #endif
 	parse_early_param();
 	after_dashes = parse_args("Booting kernel",
@@ -612,6 +635,7 @@ asmlinkage __visible void __init start_kernel(void)
 	timekeeping_init();
 	time_init();
 	sched_clock_postinit();
+	printk_nmi_init();
 	perf_event_init();
 	profile_init();
 	call_function_init();
@@ -669,7 +693,7 @@ asmlinkage __visible void __init start_kernel(void)
 	/* Should be run before the first non-init thread is created */
 	init_espfix_bsp();
 #endif
-	thread_info_cache_init();
+	thread_stack_cache_init();
 	cred_init();
 	fork_init();
 	proc_caches_init();
@@ -687,6 +711,9 @@ asmlinkage __visible void __init start_kernel(void)
 	cgroup_init();
 	taskstats_init_early();
 	delayacct_init();
+#ifdef CONFIG_HW_RECLAIM_ACCT
+	reclaimacct_init();
+#endif
 
 	check_bugs();
 
@@ -748,24 +775,29 @@ static int __init initcall_blacklist(char *str)
 
 static bool __init_or_module initcall_blacklisted(initcall_t fn)
 {
-	struct list_head *tmp;
 	struct blacklist_entry *entry;
-	char *fn_name;
+	char fn_name[KSYM_SYMBOL_LEN];
+	unsigned long addr;
 
-	fn_name = kasprintf(GFP_KERNEL, "%pf", fn);
-	if (!fn_name)
+	if (list_empty(&blacklisted_initcalls))
 		return false;
 
-	list_for_each(tmp, &blacklisted_initcalls) {
-		entry = list_entry(tmp, struct blacklist_entry, next);
+	addr = (unsigned long) dereference_function_descriptor(fn);
+	sprint_symbol_no_offset(fn_name, addr);
+
+	/*
+	 * fn will be "function_name [module_name]" where [module_name] is not
+	 * displayed for built-in init functions.  Strip off the [module_name].
+	 */
+	strreplace(fn_name, ' ', '\0');
+
+	list_for_each_entry(entry, &blacklisted_initcalls, next) {
 		if (!strcmp(fn_name, entry->buf)) {
 			pr_debug("initcall %s blacklisted\n", fn_name);
-			kfree(fn_name);
 			return true;
 		}
 	}
 
-	kfree(fn_name);
 	return false;
 }
 #else
@@ -830,6 +862,7 @@ int __init_or_module do_one_initcall(initcall_t fn)
 	}
 	WARN(msgbuf[0], "initcall %pF returned with %s\n", fn, msgbuf);
 
+	add_latent_entropy();
 	return ret;
 }
 
@@ -908,7 +941,6 @@ static void __init do_basic_setup(void)
 	do_ctors();
 	usermodehelper_enable();
 	do_initcalls();
-	random_int_secret_init();
 }
 
 static void __init do_pre_smp_initcalls(void)
@@ -954,20 +986,26 @@ static int try_to_run_init_process(const char *init_filename)
 
 static noinline void __init kernel_init_freeable(void);
 
-#ifdef CONFIG_DEBUG_RODATA
-static bool rodata_enabled = true;
+#if defined(CONFIG_DEBUG_RODATA) || defined(CONFIG_DEBUG_SET_MODULE_RONX)
+bool rodata_enabled __ro_after_init = true;
 static int __init set_debug_rodata(char *str)
 {
 	return strtobool(str, &rodata_enabled);
 }
 __setup("rodata=", set_debug_rodata);
+#endif
 
+#ifdef CONFIG_DEBUG_RODATA
 static void mark_readonly(void)
 {
-	if (rodata_enabled)
+	if (rodata_enabled) {
+#ifndef CONFIG_HISI_EARLY_RODATA_PROTECTION
+		mark_constdata_ro();
+#endif
 		mark_rodata_ro();
-	else
+	} else {
 		pr_info("Kernel memory protection disabled.\n");
+	}
 }
 #else
 static inline void mark_readonly(void)
@@ -988,7 +1026,7 @@ static int __ref kernel_init(void *unused)
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
 
-	flush_delayed_fput();
+	rcu_end_inkernel_boot();
 
 	pr_err("Kernel init end, jump to execute /init\n");
 #ifdef CONFIG_HUAWEI_BOOT_TIME
@@ -1012,6 +1050,11 @@ static int __ref kernel_init(void *unused)
 		ret = run_init_process(execute_command);
 		if (!ret)
 			return 0;
+#ifdef CONFIG_HISI_ENGINEER_MODE
+		ret = run_init_process("/init");
+		if (!ret)
+			return 0;
+#endif
 		panic("Requested init %s failed (error %d).",
 		      execute_command, ret);
 	}

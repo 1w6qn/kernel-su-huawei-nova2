@@ -25,7 +25,6 @@
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
-#include <linux/hisi/hilog.h>
 
 #define  AK4376_MCLK_FERQ     (19200000)
 #define  EXTERN_HIFI_CODEC_AK4376_NAME  "ak4376"
@@ -226,7 +225,6 @@ static int hi3650_hi6402_probe(struct platform_device *pdev)
 	ret = snd_soc_register_card(card);
 	if (ret) {
 		pr_err("%s : register failed %d\n", __FUNCTION__, ret);
-		HiLOGE("audio", "Hi3650_hi6402", "%s : register failed %d\n", __FUNCTION__, ret);
 	}
 
 	return ret;

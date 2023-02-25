@@ -55,6 +55,8 @@
 #include <linux/uidgid.h>
 #include <linux/cred.h>
 
+#include <linux/nospec.h>
+
 #include <linux/kmsg_dump.h>
 /* Move somewhere else to avoid recompiling? */
 #include <generated/utsrelease.h>
@@ -1190,10 +1192,6 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 		errno = -EFAULT;
 	if (!errno && override_architecture(name))
 		errno = -EFAULT;
-	if (!errno && is_compat_task() &&
-	    copy_to_user(name->machine, "armv7l", strlen("armv7l") + 1))
-		errno = -EFAULT;
-
 	return errno;
 }
 
@@ -1354,6 +1352,7 @@ SYSCALL_DEFINE2(old_getrlimit, unsigned int, resource,
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
 
+	resource = array_index_nospec(resource, RLIM_NLIMITS);
 	task_lock(current->group_leader);
 	x = current->signal->rlim[resource];
 	task_unlock(current->group_leader);
@@ -2262,11 +2261,21 @@ static int prctl_set_vma(unsigned long opt, unsigned long start,
 }
 #endif
 
+int __weak arch_prctl_spec_ctrl_get(struct task_struct *t, unsigned long which)
+{
+	return -EINVAL;
+}
+
+int __weak arch_prctl_spec_ctrl_set(struct task_struct *t, unsigned long which,
+				    unsigned long ctrl)
+{
+	return -EINVAL;
+}
+
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)
 {
 	struct task_struct *me = current;
-	struct task_struct *tsk;
 	unsigned char comm[sizeof(me->comm)];
 	long error;
 
@@ -2415,26 +2424,6 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_GET_TID_ADDRESS:
 		error = prctl_get_tid_address(me, (int __user **)arg2);
 		break;
-	case PR_SET_TIMERSLACK_PID:
-		if (task_pid_vnr(current) != (pid_t)arg3 &&
-				!capable(CAP_SYS_NICE))
-			return -EPERM;
-		rcu_read_lock();
-		tsk = find_task_by_vpid((pid_t)arg3);
-		if (tsk == NULL) {
-			rcu_read_unlock();
-			return -EINVAL;
-		}
-		get_task_struct(tsk);
-		rcu_read_unlock();
-		if (arg2 <= 0)
-			tsk->timer_slack_ns =
-				tsk->default_timer_slack_ns;
-		else
-			tsk->timer_slack_ns = arg2;
-		put_task_struct(tsk);
-		error = 0;
-		break;
 	case PR_SET_CHILD_SUBREAPER:
 		me->signal->is_child_subreaper = !!arg2;
 		break;
@@ -2460,7 +2449,8 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_SET_THP_DISABLE:
 		if (arg3 || arg4 || arg5)
 			return -EINVAL;
-		down_write(&me->mm->mmap_sem);
+		if (down_write_killable(&me->mm->mmap_sem))
+			return -EINTR;
 		if (arg2)
 			me->mm->def_flags |= VM_NOHUGEPAGE;
 		else
@@ -2485,6 +2475,16 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		break;
 	case PR_SET_VMA:
 		error = prctl_set_vma(arg2, arg3, arg4, arg5);
+		break;
+	case PR_GET_SPECULATION_CTRL:
+		if (arg3 || arg4 || arg5)
+			return -EINVAL;
+		error = arch_prctl_spec_ctrl_get(me, arg2);
+		break;
+	case PR_SET_SPECULATION_CTRL:
+		if (arg4 || arg5)
+			return -EINVAL;
+		error = arch_prctl_spec_ctrl_set(me, arg2, arg3);
 		break;
 	default:
 		error = -EINVAL;

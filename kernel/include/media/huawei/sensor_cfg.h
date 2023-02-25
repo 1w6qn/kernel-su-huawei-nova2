@@ -53,9 +53,14 @@ typedef enum _tag_hwsensor_position_kind
     HWSENSOR_POSITION_REAR                      =    0,
     HWSENSOR_POSITION_FORE                      =    1,
     HWSENSOR_POSITION_SUBREAR                   =    2,
-    HWSENSOR_POSITION_SUBFORE                   =    3,
-    HWSENSOR_POSITION_IRIS                      =    8,
-    HWSENSOR_POSITION_GAZE = 9,
+    HWSENSOR_POSITION_SUBFORE                   =    3,//legacy
+    HWSENSOR_POSITION_REAR_THIRD                =    4,
+    HWSENSOR_POSITION_REAR_SECOND               =    5,
+    HWSENSOR_POSITION_REAR_FORTH                =    6,
+    HWSENSOR_POSITION_FORE_SECOND               =    7,
+    HWSENSOR_POSITION_FORE_THIRD                =    8,
+    HWSENSOR_POSITION_IR4STRUCTURELIGHT = 10,
+    HWSENSOR_POSITION_GAZE                      =    12,
 } hwsensor_position_kind_t;
 
 typedef enum _tag_hwsensor_flash_pos_type_kind
@@ -70,6 +75,7 @@ typedef struct _tag_hwsensor_info
 
     char                                        name[DEVICE_NAME_SIZE];
     char                                        vcm_name[DEVICE_NAME_SIZE];
+    char                                        extend_name[DEVICE_NAME_SIZE];
     int                                         vcm_enable;
     hwsensor_position_kind_t                    mount_position;
     uint32_t                                    mount_angle;
@@ -79,6 +85,9 @@ typedef struct _tag_hwsensor_info
     int                                         module_type;
     int                                         valid;
     hwsensor_flash_pos_type_kind_t              flash_pos_type;
+    int                                         irTopologyType;
+    int                                         phyinfo_count;
+    phy_info_t                                  phyinfo;
 } hwsensor_info_t;
 
 /********************* cfg data define ************************************/
@@ -96,6 +105,8 @@ enum sensor_config_type
 	SEN_CONFIG_OIS_WPB_CTRL,
 	SEN_CONFIG_RESET_HOLD,
 	SEN_CONFIG_RESET_RELEASE,
+	SEN_CONFIG_MIPI_SWITCH,
+	SEN_CONFIG_FPC_CHECK,
 	SEN_CONFIG_MAX_INDEX
 };
 
@@ -117,21 +128,54 @@ struct sensor_i2c_setting {
 
 /*sensor ioctl arg*/
 struct sensor_cfg_data {
-	int cfgtype;
-	int mode;
-	int data;
+    int cfgtype;
+    int mode;
+    int data;
+    int factory;
 
-	union {
-	char name[DEVICE_NAME_SIZE];
-	struct sensor_i2c_reg reg;
-	struct sensor_i2c_setting setting;
-	//struct hisi_sensor_af_otp af_otp;
-	} cfg;
+    union {
+        char name[DEVICE_NAME_SIZE];
+        struct sensor_i2c_reg reg;
+        struct sensor_i2c_setting setting;
+        //struct hisi_sensor_af_otp af_otp;
+    } cfg;
+    union {
+         char extend_name[DEVICE_NAME_SIZE];
+    }info;
 };
 
+typedef enum _tag_sensor_otp_cfg_type_t
+{
+    SENSOR_CONFIG_OTP_GET = 0,
+    SENSOR_CONFIG_OTP_UPDATE,
+    SENSOR_CONFIG_OTP_MAX_INDEX,
+} sensor_otp_cfg_type_t;
 
-#define HWSENSOR_IOCTL_GET_INFO                 _IOR('S', BASE_VIDIOC_PRIVATE + 1, hwsensor_info_t)
+typedef enum {
+    IRSENSOR_DEFAULT_OTP = 0,
+    IRSENSOR_HOLDER_OTP,
+    IRSENSOR_DEVICE_OTP,
+    IRSENSOR_ENTIRETY_OTP,
+    IRSENSOR_DOT_OTP,
+    IRSENSOR_WARPXY_OTP,
+} sensor_mode_otp_t;
+
+typedef struct _tag_hwsensor_config_otp_t
+{
+    unsigned int           cfg_type;//get or update otp
+    unsigned int           type;// otp type
+    void*                  otp_buffer;
+    unsigned int           otp_buffer_size;
+} hwsensor_config_otp_t;
+
+typedef struct _sensor_thermal_data{
+    int data;  // thermal value
+}sensor_thermal_data;
+
+#define HWSENSOR_IOCTL_GET_INFO                         _IOR('S',  BASE_VIDIOC_PRIVATE + 1, hwsensor_info_t)
 #define HWSENSOR_IOCTL_SENSOR_CFG 		        _IOWR('V', BASE_VIDIOC_PRIVATE + 2, struct sensor_cfg_data)
+#define HWSENSOR_IOCTL_OTP_CFG                          _IOWR('O', BASE_VIDIOC_PRIVATE + 3, hwsensor_config_otp_t)
+#define HWSENSOR_IOCTL_GET_THERMAL                      _IOR('S', BASE_VIDIOC_PRIVATE + 2, sensor_thermal_data)
 
 #endif // __HW_ALAN_KERNEL_HWCAM_SENSOR_CFG_H__
 

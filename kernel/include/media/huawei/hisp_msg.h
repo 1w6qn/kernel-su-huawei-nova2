@@ -133,6 +133,7 @@ typedef enum
     PRIMARY_CAMERA = 0,
     FRONT_CAMERA,
     SECONDARY_CAMERA,
+    THIRD_CAMERA,
 } camera_id_t;
 
 typedef struct _msg_req_query_capability_t
@@ -278,6 +279,7 @@ typedef struct _stream_config_t
     unsigned int height;
     unsigned int stride;
     unsigned int format;
+    unsigned int secure;
 } stream_config_t;
 
 typedef struct _msg_req_usecase_config_t
@@ -686,6 +688,8 @@ typedef enum
     SUBCMD_SET_SWPD_KEY                   = 152,
     SUBCMD_GET_SWPD_KEY                   = 153,
     SUBCMD_GET_SENSOR_COORD               = 154,
+    SUBCMD_SET_AE_SENSOR_VERIFY_MODE      = 155,
+    SUBCMD_SET_AFSTAT_ALGO_RESULT         = 156,
 
 } extendset_info_e;
 
@@ -708,6 +712,7 @@ typedef enum
     EVENT_AF_DIRECT_TRANS_BASE,
     EVENT_AF_OTP_CALIB_DATA,
     EVENT_AF_SELF_LEARN_DATA,
+    EVENT_AF_STAT_INFO,
 } event_info_e;
 
 typedef struct _msg_subreq_es_watchdog_t

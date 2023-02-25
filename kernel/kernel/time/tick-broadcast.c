@@ -610,6 +610,14 @@ static void tick_handle_oneshot_broadcast(struct clock_event_device *dev)
 	now = ktime_get();
 	/* Find all expired events */
 	for_each_cpu(cpu, tick_broadcast_oneshot_mask) {
+		/*
+		 * Required for !SMP because for_each_cpu() reports
+		 * unconditionally CPU0 as set on UP kernels.
+		 */
+		if (!IS_ENABLED(CONFIG_SMP) &&
+		    cpumask_empty(tick_broadcast_oneshot_mask))
+			break;
+
 		td = &per_cpu(tick_cpu_device, cpu);
 		if (td->evtdev->next_event.tv64 <= now.tv64) {
 			cpumask_set_cpu(cpu, tmpmask);
@@ -933,6 +941,7 @@ void hotplug_cpu__broadcast_tick_pull(int deadcpu)
 {
 	struct clock_event_device *bc;
 	unsigned long flags;
+	unsigned int cpu;
 
 	raw_spin_lock_irqsave(&tick_broadcast_lock, flags);
 	bc = tick_broadcast_device.evtdev;
@@ -941,6 +950,11 @@ void hotplug_cpu__broadcast_tick_pull(int deadcpu)
 		/* This moves the broadcast assignment to this CPU: */
 		clockevents_program_event(bc, bc->next_event, 1);
 	}
+
+	/*deadcpu already removed from online_mask*/
+	cpu = cpumask_first(cpu_online_mask);
+	tick_broadcast_set_affinity(bc, cpumask_of(cpu));
+
 	raw_spin_unlock_irqrestore(&tick_broadcast_lock, flags);
 }
 

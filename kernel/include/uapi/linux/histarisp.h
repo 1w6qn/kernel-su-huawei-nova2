@@ -30,6 +30,8 @@
 #define HISP_POOL_ALLOC             _IOWR('i', 0x1214, rpmsg_ioctl_arg_t)
 #define HISP_POOL_FREE              _IOWR('i', 0x1215, rpmsg_ioctl_arg_t)
 
+#define SENSOR_NAME_SIZE (64)
+
 typedef struct addrparams{
     unsigned int moduleaddr;
     unsigned int iova;
@@ -51,7 +53,7 @@ typedef struct map_hisp_cfg_data {
 
 typedef struct rpmsg_ioctl_arg {
 	int index;
-	char name[32];
+	char name[SENSOR_NAME_SIZE];
 }rpmsg_ioctl_arg_t;
 
 typedef enum
@@ -254,6 +256,7 @@ typedef struct _msg_req_map_buffer_t
     unsigned int cam_id;
     unsigned int mem_pool_buffer;
     unsigned int buffer_size;
+    unsigned int vendor_capability_extend;//bit[0]: 1-pdaf support,0- pdaf not support;bit[1]:1-rear dual camera support,0-rear dual camera not support; others: reserved
 } msg_req_map_buffer_t;
 
 typedef struct _msg_ack_map_buffer_t

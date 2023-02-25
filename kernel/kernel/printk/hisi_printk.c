@@ -13,8 +13,9 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 
+#include <linux/version.h>
 #ifdef CONFIG_HUAWEI_PRINTK_CTRL
-#include <huawei_platform/log/log_usertype/log-usertype.h>
+#include <log/log_usertype.h>
 #include <linux/hisi/hw_cmdline_parse.h> /*for runmode_is_factory*/
 #endif
 
@@ -68,13 +69,15 @@ size_t print_time(u64 ts, char *buf)
 	if (!buf) {
 		return (unsigned int)snprintf(NULL, 0, "[%5lu.000000s]",
 				(unsigned long)ts
-				);
+				);/* [false alarm]:buffer will not overflow  */
 	}
 
 	// cppcheck-suppress *
+	/*lint -save -e421 */
 	temp = sprintf(buf, "[%5lu.%06lus]",
 			(unsigned long)ts, rem_nsec/1000
-			);
+			);/* [false alarm]:buffer will not overflow  */
+	/*lint -restore */
 	if (temp >= 0) {
 		return (unsigned int)temp;
 	} else {
@@ -159,7 +162,7 @@ void hisi_log_store_add_time(char *hisi_char, u32 sizeof_hisi_char, u16 *hisi_le
 		prev_jffy = jiffies;
 	}
 	cur_secs = get_seconds();
-	cur_secs -= sys_tz.tz_minuteswest * 60;
+	cur_secs -= sys_tz.tz_minuteswest * 60; /*lint !e647*/
 	time_to_tm(cur_secs, 0, &tm_rtc);
 	if (time_after(jiffies, prev_jffy + 1 * HZ)) {
 		prev_jffy = jiffies;
@@ -179,19 +182,30 @@ pure_initcall(uniformity_timer_init);
 #ifdef CONFIG_HISI_AMBA_PL011
 int get_console_index(void)
 {
+#if(LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0))
+	if ((preferred_console != -1) && (preferred_console < MAX_CMDLINECONSOLES))
+		return console_cmdline[preferred_console].index;
+#else
 	if ((selected_console != -1) && (selected_console < MAX_CMDLINECONSOLES))
 		return console_cmdline[selected_console].index;
+#endif
 
 	return -1;
 }
 
 int get_console_name(char *name, int name_buf_len)
 {
-	if ((selected_console != -1) && (selected_console < MAX_CMDLINECONSOLES)) {
-		strncpy(name, console_cmdline[selected_console].name, min(sizeof(console_cmdline[selected_console].name), name_buf_len));
+#if(LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0))
+	if ((preferred_console != -1) && (preferred_console < MAX_CMDLINECONSOLES)) {
+		strncpy(name, console_cmdline[preferred_console].name, min((int)(sizeof(console_cmdline[preferred_console].name)), name_buf_len)); /*lint !e574 !e58*/
 		return 0;
 	}
-
+#else
+	if ((selected_console != -1) && (selected_console < MAX_CMDLINECONSOLES)) {
+		strncpy(name, console_cmdline[selected_console].name, min((int)(sizeof(console_cmdline[selected_console].name)), name_buf_len)); /*lint !e574 !e58*/
+		return 0;
+	}
+#endif
 	return -1;
 }
 #endif

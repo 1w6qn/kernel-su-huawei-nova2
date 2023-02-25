@@ -53,6 +53,9 @@
 /* big enough to hold our biggest descriptor */
 #define USB_COMP_EP0_BUFSIZ	1024
 
+/* OS feature descriptor length <= 4kB */
+#define USB_COMP_EP0_OS_DESC_BUFSIZ	4096
+
 #define USB_MS_TO_HS_INTERVAL(x)	(ilog2((x * 1000 / 125)) + 1)
 struct usb_configuration;
 
@@ -220,7 +223,8 @@ struct usb_function {
 	int			(*setup)(struct usb_function *,
 					const struct usb_ctrlrequest *);
 	bool			(*req_match)(struct usb_function *,
-					const struct usb_ctrlrequest *);
+					const struct usb_ctrlrequest *,
+					bool config0);
 	void			(*suspend)(struct usb_function *);
 	void			(*resume)(struct usb_function *);
 

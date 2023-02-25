@@ -1,98 +1,72 @@
 /*
- * check_root.c
+ * check_root proc and stp trace log save
  *
- * the check_root.c file for creatting check_root proc file 
- *
- * Copyright (c) 2001-2021, Huawei Tech. Co., Ltd. All rights reserved.
- *
- * Zhangzhebo <zhangzhebo@huawei.com>
+ * Copyright (c) 2001-2017, Huawei Tech. Co., Ltd., Zhebo Zhang <zhangzhebo at huawei.com>
+ * Copyright (C) 2018 Huawei Tech. Co., Ltd., Ningyu Wang <wangningyu at huawei.com>
  *
  */
 
+#include <linux/fs.h>
+#include <linux/syscalls.h>
+#include <linux/time.h>
+#include <linux/uaccess.h>
+#include <linux/rtc.h>
+#include <linux/statfs.h>
+#include <linux/vmalloc.h>
+#include <linux/stacktrace.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/cred.h>
-#include <linux/mm.h>
-#include <linux/utsname.h>
-#include <linux/mman.h>
-#include <linux/notifier.h>
-#include <linux/reboot.h>
-#include <linux/prctl.h>
-#include <linux/highuid.h>
-#include <linux/fs.h>
-#include <linux/perf_event.h>
-#include <linux/resource.h>
 #include <linux/kernel.h>
-#include <linux/kexec.h>
-#include <linux/capability.h>
-#include <linux/device.h>
-#include <linux/key.h>
-#include <linux/times.h>
-#include <linux/posix-timers.h>
-#include <linux/security.h>
-#include <linux/suspend.h>
-#include <linux/tty.h>
-#include <linux/signal.h>
-#include <linux/cn_proc.h>
-#include <linux/getcpu.h>
-#include <linux/task_io_accounting_ops.h>
-#include <linux/seccomp.h>
-#include <linux/cpu.h>
-#include <linux/personality.h>
-#include <linux/ptrace.h>
-#include <linux/fs_struct.h>
-#include <linux/gfp.h>
-#include <linux/syscore_ops.h>
-#include <linux/version.h>
-#include <linux/ctype.h>
-
-#include <linux/compat.h>
-#include <linux/syscalls.h>
-#include <linux/user_namespace.h>
-
-#include <linux/kmsg_dump.h>
-#include <generated/utsrelease.h>
-
-#include <asm/uaccess.h>
-#include <asm/io.h>
-//#include <asm/unistd.h>
-
 #include<chipset_common/security/check_root.h>
-
-// for dynamic root scan triggering
-#ifdef CONFIG_HW_ROOT_SCAN
-#include <chipset_common/security/root_scan.h>
-#endif
 
 #define ANDROID_THIRD_PART_APK_UID 10000
 #define AID_SHELL		   2000
-
-/* uncomment this for force stop setXid */
-// #define CONFIG_CHECKROOT_FORCE_STOP
+#define STP_LOG_DIR  "/log/stp"
+#define STP_LOG_PATH_LEN  64
+#define STP_LOG_DIR_MODE  0775
+#define STP_LOG_FILE_MODE  0664
+#define STP_LOG_SIZE  1024
+#define STP_STACK_DEPTH  10
 
 static struct checkroot_ref_cnt checkroot_ref;
+
+uint get_setids_state(void)
+{
+	unsigned int ids = 0;
+
+	if (checkroot_ref.setuid)
+		ids |= CHECKROOT_SETUID_FLAG;
+	if (checkroot_ref.setgid)
+		ids |= CHECKROOT_SETGID_FLAG;
+	if (checkroot_ref.setresuid)
+		ids |= CHECKROOT_SETRESUID_FLAG;
+	if (checkroot_ref.setresgid)
+		ids |= CHECKROOT_SETRESGID_FLAG;
+
+	return ids;
+}
+
+/* uncomment this for force stop setXid */
+/* #define CONFIG_CHECKROOT_FORCE_STOP */
 
 static int checkroot_risk_id(int curr_id, int flag)
 {
 	const struct cred *now;
+
 	now = current_cred();
 
-	if (curr_id <= ANDROID_THIRD_PART_APK_UID && curr_id != AID_SHELL) {
+	if (curr_id < ANDROID_THIRD_PART_APK_UID && curr_id != AID_SHELL) {
 		return 0;
 	}
-	printk(KERN_EMERG "check_root: Uid %d, Gid %d, try to Privilege Escalate\n",
+	pr_emerg("check_root: Uid %d, Gid %d, try to Privilege Escalate\n",
 			now->uid.val, now->gid.val);
 
-	// for dynamic root scan triggering
-#ifdef CONFIG_HW_ROOT_SCAN
-	rscan_trigger();
-#endif
-
 #ifdef CONFIG_CHECKROOT_FORCE_STOP
-	return 1;
-#else
+	if (curr_id >= ANDROID_THIRD_PART_APK_UID) {
+		force_sig(SIGKILL, current);
+		return -1;
+	}
+#endif
 	if (flag & CHECKROOT_SETUID_FLAG) {
 		checkroot_ref.setuid++;
 	}
@@ -106,7 +80,6 @@ static int checkroot_risk_id(int curr_id, int flag)
 		checkroot_ref.setresgid++;
 	}
 	return 0;
-#endif
 }
 
 int checkroot_setuid(uid_t uid)
@@ -129,32 +102,129 @@ int checkroot_setresgid(gid_t gid)
 	return checkroot_risk_id((int)gid, CHECKROOT_SETRESGID_FLAG);
 }
 
-static int checkroot_proc_show(struct seq_file *m, void *v)
-{
-	seq_printf(m, "setuid %d\nsetgid %d\nsetresuid %d\nsetresgid %d\n",
-			checkroot_ref.setuid, checkroot_ref.setgid,
-			checkroot_ref.setresuid, checkroot_ref.setresgid);
-
-	return 0;
-}
-
-static int checkroot_proc_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, checkroot_proc_show, NULL);
-}
-
-static const struct file_operations checkroot_proc_fops = {
-	.open		= checkroot_proc_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
 static int __init proc_checkroot_init(void)
 {
-	memset(&checkroot_ref, 0, sizeof(checkroot_ref));
-	proc_create("check_root", 0, NULL, &checkroot_proc_fops);
-
+	(void)memset(&checkroot_ref, 0, sizeof(checkroot_ref));
 	return 0;
 }
+
+static void __exit proc_checkroot_exit(void)
+{
+	return;
+}
+
+static char* get_current_asctime(void)
+{
+	struct timeval tv = {0};
+	unsigned long long rtc_time;
+	struct rtc_time tm;
+	static char asctime[32];
+
+	/*1.get rtc timer*/
+	do_gettimeofday(&tv);
+	rtc_time = (unsigned long long)tv.tv_sec;
+
+	/*2.convert rtc to asctime*/
+	memset((void *)asctime, 0, sizeof(asctime));
+	memset((void *)&tm, 0, sizeof(struct rtc_time));
+	rtc_time_to_tm(rtc_time, &tm);
+	snprintf(asctime, sizeof(asctime) - 1, "%04d%02d%02d%02d%02d%02d",
+			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+	return asctime;
+}
+
+static void stp_print_trace_info(char *buf, size_t len, const char *name)
+{
+	int ret;
+	unsigned long entries[STP_STACK_DEPTH];
+	struct stack_trace trace = {
+		.nr_entries = 0,
+		.entries = entries,
+		.max_entries = STP_STACK_DEPTH,
+		.skip = 0
+	};
+
+	if (!buf || !len) {
+		return;
+	}
+
+	ret = snprintf(buf, len,
+			"{\"name\":\"%s\",\"detail\":\"time:%s,pid:%d,pcomm:%.20s,tgid:%d,tgcomm:%.20s,stack:",
+			name, get_current_asctime(), current->pid, current->comm,
+			current->tgid, current->group_leader->comm);
+	if (ret >= len) {
+		goto out;
+	}
+
+	save_stack_trace(&trace);
+	ret += snprint_stack_trace(buf + ret, len - ret, &trace, 0);
+	if (ret >= len) {
+		goto out;
+	}
+	snprintf(buf + ret, len - ret, "\"}\n");
+
+out:
+	buf[len - 1] = '\0';
+	return;
+}
+
+void stp_save_trace_log(const char *name)
+{
+	mm_segment_t old_fs;
+	int fd = -1;
+	char *buf = NULL;
+	char path[STP_LOG_PATH_LEN] = {0};
+	size_t len, written;
+
+	/* judge irq is comment out for all calls of stp_save_trace_log should be
+	followed by BUG or VENDOR_EXCEPTION */
+	/* if (in_irq() || in_softirq() || irqs_disabled())
+	{
+		return;
+	} */
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	if (sys_access(STP_LOG_DIR, 0) != 0) {
+		if (sys_mkdir(STP_LOG_DIR, STP_LOG_DIR_MODE) < 0) {
+			pr_err("create stp log dir failed!\n");
+			goto out;
+		}
+	}
+
+	(void)snprintf(path, sizeof(path) - 1, "%s/%s.log", STP_LOG_DIR, name);
+	fd = sys_open(path, O_CREAT | O_WRONLY | O_APPEND, STP_LOG_FILE_MODE);
+	if (fd < 0) {
+		pr_err("open file %s failed! fd = %d\n", path, fd);
+		goto out;
+	}
+
+	buf = (char *)vmalloc(STP_LOG_SIZE);
+	if (!buf) {
+		pr_err("vmalloc stp log buffer failed\n");
+		goto nomem;
+	}
+
+	stp_print_trace_info(buf, STP_LOG_SIZE, name);
+	pr_err("stp trace log: %s", buf);
+	len = strlen((char *)buf);
+	written = sys_write(fd, buf, len);
+	if (written != len) {
+		pr_err("write %s log failed! %ld/%ld\n", name, written, len);
+	}
+
+	vfree(buf);
+	sys_sync();
+
+nomem:
+	sys_close(fd);
+
+out:
+	set_fs(old_fs);
+}
+
 module_init(proc_checkroot_init);
+module_exit(proc_checkroot_exit);
